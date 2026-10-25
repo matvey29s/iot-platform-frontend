@@ -67,8 +67,16 @@ function seed() {
   db.ports.set('lcd', { id: 'lcd', kind: 'fixed', connected: true });
 
   // "modules" bay: demo default = RS-485 already plugged in
-  db.ports.set('modules', { id: 'modules', kind: 'module', connected: true, detectedType: 'rs485' });
-  db.moduleConfigs.set('modules', {
+  db.ports.set('modules', {
+    id: 'modules',
+    kind: 'module',
+    connected: true,
+    slots: [
+      { slot: 1, connected: true, detectedType: 'rs485', adcPercent: 20, adcRaw: 819, adcOk: true },
+      { slot: 2, connected: true, detectedType: 'relay', adcPercent: 50, adcRaw: 2048, adcOk: true }
+    ]
+  });
+  db.moduleConfigs.set('module1', {
     baudRate: 9600,
     parity: 'none',
     dataBits: 8,
@@ -77,7 +85,9 @@ function seed() {
     protocol: 'modbus_rtu'
   } as Rs485Config);
 
-  db.registerTables.set('modules', [
+  db.moduleConfigs.set('module2', { channels: 8, safeState: 'all_off' } as RelayConfig);
+
+  db.registerTables.set('module1', [
     { byteIndex: 0, name: 'temperature', dataType: 'int16', description: 'Температура, x0.1°C' },
     { byteIndex: 2, name: 'humidity', dataType: 'uint16', description: 'Влажность, x0.1%' },
     { byteIndex: 4, name: 'status_flags', dataType: 'uint8', description: 'Битовые флаги состояния' }
@@ -113,7 +123,8 @@ export async function saveModuleConfig(
 ): Promise<{ ok: boolean; error?: string }> {
   await delay(300);
   const port = db.ports.get(portId);
-  if (!port || !port.connected) {
+  const slot = db.ports.get('modules')?.slots?.find((x) => `module${x.slot}` === portId);
+  if (!port && !slot?.connected) {
     return { ok: false, error: 'Модуль не обнаружен в данном слоте' };
   }
   db.moduleConfigs.set(portId, config);
@@ -122,14 +133,8 @@ export async function saveModuleConfig(
 
 // demo-only: simulate plugging/unplugging a module, mirrors the Go backend's
 // /api/_simulate/ endpoint from the earlier full-stack build
-export async function simulateHotplug(portId: string, type: 'rs485' | 'relay' | null): Promise<void> {
-  await delay(150);
-  const port = db.ports.get(portId);
-  if (!port) return;
-  port.connected = !!type;
-  port.detectedType = type;
-  db.ports.set(portId, port);
-  emit({ type: 'port_state', payload: { ...port } });
+export async function simulateHotplug(_portId: string, _type: 'rs485' | 'relay' | null): Promise<void> {
+  /* unused: real detection now comes from the daemon */
 }
 
 // demo-only: toggle a plain fixed/link port (ethernet2, usb, audioIn, ...)
@@ -230,7 +235,7 @@ export function subscribeLive(listener: Listener): () => void {
 // refresh, so Scenario/Monitoring screens have something live to render even
 // with no backend attached yet.
 let simTick = 0;
-setInterval(() => {
+function tickSim() {
   simTick += 1;
 
   if (db.ports.get('modules')?.connected) {
@@ -247,14 +252,23 @@ setInterval(() => {
   if (db.scenarioStatus.running) {
     emit({ type: 'scenario_status', payload: { ...db.scenarioStatus } });
   }
-}, 1000);
+}
 
-setInterval(() => {
+function tickSystem() {
   db.system.cpuUsagePercent = Math.max(3, Math.min(95, db.system.cpuUsagePercent + (Math.random() * 10 - 5)));
   db.system.ramUsedMb = Math.max(100, Math.min(db.system.ramTotalMb - 20, db.system.ramUsedMb + (Math.random() * 20 - 10)));
   db.system.uptimeSeconds += 3;
   db.system.sampledAt = Date.now();
   emit({ type: 'system_info', payload: { ...db.system } });
-}, 3000);
+}
+
+let simStarted = false;
+/** Only for `npm run dev:mock` (no controller). The real build never runs this. */
+export function startSimulation() {
+  if (simStarted) return;
+  simStarted = true;
+  setInterval(tickSim, 1000);
+  setInterval(tickSystem, 3000);
+}
 
 export { PORT_IDS };

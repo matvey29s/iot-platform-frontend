@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import * as api from '../api/mockApi';
+import * as api from '../api';
 import type { ModuleType, RegisterTableRow, Rs485Config, RelayConfig } from '../api/types';
 
 interface Props {
@@ -68,7 +68,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
     <div style={styles.backdrop} onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="card" style={styles.modal}>
         <h2 style={{ fontSize: 16, margin: '0 0 4px' }}>
-          {portId} — {moduleType === 'rs485' ? 'RS-485' : 'Реле'}
+          Модуль {portId.replace('module', '')} — {moduleType === 'rs485' ? 'RS-485' : 'Реле'}
         </h2>
 
         {moduleType === 'rs485' && (

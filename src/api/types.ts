@@ -16,12 +16,23 @@ export interface AuthResult {
 
 export type PortKind = 'fixed' | 'link' | 'module';
 
+/** One expansion slot behind the "modules" port. Slot 1 = ADC channel 0, slot 2 = ADC channel 1. */
+export interface SlotState {
+  slot: number; // 1 | 2
+  connected: boolean;
+  /** Resolved by the daemon from the ADC level (~20% RS-485, ~50% relay). */
+  detectedType: ModuleType | null;
+  adcPercent: number;
+  adcRaw: number;
+  adcOk: boolean;
+}
+
 export interface PortState {
   id: string;
   kind: PortKind;
   connected: boolean;
-  /** Only for kind === 'module': resolved identity once something is plugged in. */
-  detectedType?: ModuleType | null;
+  /** Only for the "modules" port: the two expansion slots. */
+  slots?: SlotState[];
 }
 
 export type ModuleType = 'rs485' | 'relay';

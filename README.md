@@ -8,7 +8,8 @@ simulates latency, so the whole UI works standalone.
 
 ```sh
 npm install
-npm run dev       # http://localhost:5173, login with admin / admin
+npm run dev:mock  # http://localhost:5173 with an in-memory mock, no controller needed
+NEXUS_BACKEND=http://<device-ip>:8080 npm run dev   # UI in dev mode, real data from the device
 npm run build     # production build -> dist/
 ```
 
@@ -33,44 +34,64 @@ actual browser before relying on it.
 | Мониторинг: Linux/RAM/CPU | `pages/MonitoringPage.tsx` |
 | Синий системный фон | `styles/theme.css`, `--brand: #0B3D91` — **плейсхолдер**, поменяйте одну переменную, когда пришлёте точный HEX/брендбук |
 
-## Запуск на устройстве (OpenWrt, AM3352)
+## Архитектура и запуск на устройстве (OpenWrt, AM3352)
 
-Node на устройстве **не нужен**: интерфейс — это статические файлы (`dist/`),
-их раздаёт штатный `uhttpd`. Вся работа интерфейса идёт в браузере ПК,
-нагрузка на устройство ничтожна.
+```
+АЦП (IIO sysfs) ─► nexusd (C) ──unix-сокет, JSON-строки──► nexus-backend (Go) ──REST + SSE──► браузер
+                     │  хук module-hook.sh: пины UART / GPIO       │  статика UI, настройки, сценарии
+                     └─ метрики Linux (/proc)                      └─ сост. Ethernet / USB / SD
+```
+
+- **`daemon/nexusd.c`** (чистый C, без зависимостей). Каждые 3 с читает АЦП: канал 0 — модуль 1,
+  канал 1 — модуль 2. Уровень ≈20% от максимума — RS-485 (пины → UART), ≈50% — реле (пины → GPIO),
+  иначе слот пуст. Тип должен совпасть `confirm=2` раза подряд, затем вызывается хук
+  `/etc/nexus/hooks/module-hook.sh <слот> uart|gpio|none`. Те же 3 с — метрики CPU/RAM/диск/uptime.
+- **`backend/`** (Go, только стандартная библиотека). Подключается к сокету daemon, отдаёт UI и
+  API, хранит настройки модулей, таблицы регистров и сценарии в `/opt/nexus-iot/data/state.json`.
+  Живые события — Server-Sent Events (`/api/events`).
+- **Frontend** ходит в `api/...` (`src/api/realApi.ts`). Без контроллера: `npm run dev:mock`.
 
 ```sh
-# 1) на ПК (нужен Node 18+)
+# 1) на ПК (Node 18+, Go 1.22+, pip install ziglang — кросс-компилятор C для ARMv7)
 npm install
 ./deploy/pack.sh                       # -> deploy/nexus-iot-openwrt.tar.gz
 
-# 2) отправить на устройство (если scp ругается — добавьте ключ -O)
-scp -O deploy/nexus-iot-openwrt.tar.gz root@<ip-устройства>:/tmp/
+# 2) на устройство (если scp ругается — ключ -O)
+scp -O deploy/nexus-iot-openwrt.tar.gz root@<ip>:/tmp/
 
 # 3) на устройстве
 cd /tmp && tar -xzf nexus-iot-openwrt.tar.gz && cd nexus-iot-openwrt
-sh install.sh            # порт 8080; другой порт: sh install.sh 8081
+sh install.sh                          # порт 8080; другой: sh install.sh 8081
 
-# 4) в браузере ПК из той же сети
-http://<ip-устройства>:8080/
+# 4) браузер ПК из той же сети:  http://<ip>:8080/
 ```
 
-- Скрипт создаёт **отдельный** экземпляр `uhttpd` (секция `uhttpd.nexus` в UCI),
-  страница LuCI на порту 80 не затрагивается. Автозапуск при загрузке включён.
-- Обновление: снова `pack.sh` → копия → `sh install.sh` (старая сборка заменяется).
-- Удаление: `sh install.sh --remove`.
-- Нужен пакет `uhttpd` (`opkg install uhttpd` или `apk add uhttpd`).
-- Адреса вкладок имеют вид `/#/monitoring` (HashRouter): обновление страницы
-  никогда не даёт 404, настраивать rewrite на сервере не нужно.
-- Папка `www` можно положить и в `/www/nexus/` — откроется как `http://<ip>/nexus/`
-  (сборка использует относительные пути, `base: './'`).
-- Если с ПК не открывается: проверьте, что ПК и устройство в одной сети и что
-  порт разрешён в зоне LAN файрвола (`/etc/config/firewall`).
+- Службы procd: `nexusd`, `nexus-backend` (автозапуск, перезапуск при падении).
+  Логи: `logread | grep nexus`. LuCI на порту 80 не затрагивается.
+- Конфиг `/etc/nexus/nexus.conf` (общий для обоих): пути АЦП, проценты, допуск, UART каждого
+  слота, порт. Обновление **не перезаписывает** ваш конфиг и хук (новые версии кладутся как `*.new`).
+- **Пины** (прописаны в `/etc/nexus/hooks/module-hook.sh`, мультиплексор пишется через `devmem` в
+  Control Module AM335x `0x44E10000`, GPIO — через sysfs):
 
-Пока бэкенда нет, сценарий хранится в `localStorage` браузера: он привязан к
-браузеру и адресу (`ip:порт`). С другого ПК или по другому адресу он будет пустым.
-Вход отключён (`AUTO_LOGIN_TOKEN` в `store/authStore.ts`) — до появления
-реального API любой в сети увидит интерфейс; включите авторизацию вместе с бэкендом.
+  | Слот | UART | GPIO |
+  |---|---|---|
+  | 1 | UART1_TXD (pad 0x984), UART1_RXD (0x980), `/dev/ttyS1` | GPIO_115, GPIO_117 |
+  | 2 | UART4_TXD (gpmc_wpn 0x874, mode 6), UART4_RXD (gpmc_wait0 0x870, mode 6), `/dev/ttyS4` | GPIO_48, GPIO_60 |
+
+  Режим RS-485: TXD/RXD → UART, две GPIO-линии — выходы, уровень 0. Режим реле: TXD/RXD → GPIO (входы),
+  две GPIO-линии — выходы, уровень 0. Слот пуст: все пины — входы. Уровень по умолчанию — `GPIO_IDLE`
+  в хуке. Нужны `devmem` (busybox) или `devmem2`, и включённый в device tree UART4. Применение
+  параметров порта RS-485 (`stty`: скорость, чётность, биты) — в том же хуке.
+- Удаление: `sh install.sh --remove` (конфиг и данные остаются) или `--purge`.
+- Если с ПК не открывается: порт должен быть разрешён в зоне файрвола, к которой подключён ПК.
+- Адреса вкладок вида `/#/monitoring` (HashRouter), 404 при обновлении страницы нет.
+
+Что определяется реально: модули (АЦП), CPU/RAM/диск/uptime/версия Linux/модель CPU, Ethernet
+(carrier интерфейсов `eth1`/`eth2` из конфига), USB-устройства, SD-карта. Не определяется: аудио-разъёмы
+(у Linux нет сигнала присутствия) — всегда «не подключено».
+Не реализовано: запуск сценариев на устройстве (кнопка «Запустить» честно отвечает ошибкой),
+чтение данных RS-485 и управление реле из сценария, настоящая авторизация (вход пока автоматический).
+История графиков хранится в памяти backend (15 мин) и сбрасывается при его перезапуске.
 
 ## Monitoring charts
 

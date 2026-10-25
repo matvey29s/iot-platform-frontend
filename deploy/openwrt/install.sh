@@ -1,82 +1,112 @@
 #!/bin/sh
 # Nexus IoT Platform - installer for OpenWrt (busybox ash compatible).
 #
-# Serves the prebuilt web UI (./www) with a dedicated uhttpd instance, so the
-# stock LuCI admin page on port 80 is left untouched.
+#   sh install.sh             install or update (UI on port 8080, or the port already configured)
+#   sh install.sh 8081        install or update on another port
+#   sh install.sh --remove    uninstall (keeps /etc/nexus and saved data)
+#   sh install.sh --purge     uninstall and delete config + saved data
 #
-#   ./install.sh             install or update, UI on port 8080
-#   ./install.sh 8081        install or update on another port
-#   ./install.sh --remove    uninstall
-#
-# Optional overrides (for non-standard layouts / testing):
-#   NEXUS_DEST   where the site is copied     (default /opt/nexus-iot/www)
-#   UHTTPD_INIT  uhttpd init script           (default /etc/init.d/uhttpd)
+# Installs: /usr/bin/nexusd (C daemon), /usr/bin/nexus-backend (Go server),
+# procd services nexusd + nexus-backend, config /etc/nexus, UI /opt/nexus-iot/www.
 set -eu
 
-NAME=nexus
-DEST="${NEXUS_DEST:-/opt/nexus-iot/www}"
-INIT="${UHTTPD_INIT:-/etc/init.d/uhttpd}"
 HERE=$(cd "$(dirname "$0")" && pwd)
+CONF=/etc/nexus/nexus.conf
+APP=/opt/nexus-iot
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "run as root"
+[ -d /etc/init.d ] && [ -f /etc/rc.common ] || die "this script is for OpenWrt (no /etc/rc.common)"
 
-command -v uci >/dev/null 2>&1 || die "uci not found - this script is for OpenWrt"
-[ -x "$INIT" ] || die "uhttpd is not installed (opkg install uhttpd  /  apk add uhttpd)"
-case "$DEST" in /|"") die "refusing to use '$DEST' as install folder" ;; esac
+stop_services() {
+  for s in nexus-backend nexusd; do
+    [ -x "/etc/init.d/$s" ] && { "/etc/init.d/$s" stop 2>/dev/null || true; "/etc/init.d/$s" disable 2>/dev/null || true; }
+  done
+}
 
 # ---- uninstall -------------------------------------------------------------
-if [ "${1:-}" = "--remove" ]; then
-  uci -q delete "uhttpd.$NAME" || true
-  uci commit uhttpd
-  "$INIT" restart
-  rm -rf "$DEST"
-  rmdir "$(dirname "$DEST")" 2>/dev/null || true
-  echo "Nexus IoT Platform removed."
-  exit 0
-fi
+case "${1:-}" in
+  --remove|--purge)
+    stop_services
+    rm -f /usr/bin/nexusd /usr/bin/nexus-backend /etc/init.d/nexusd /etc/init.d/nexus-backend
+    rm -rf "$APP/www"
+    if [ "$1" = "--purge" ]; then rm -rf /etc/nexus "$APP"; else echo "Kept: /etc/nexus and $APP/data"; fi
+    echo "Nexus IoT Platform removed."
+    exit 0 ;;
+esac
 
 # ---- checks ----------------------------------------------------------------
-PORT="${1:-8080}"
-case "$PORT" in ''|*[!0-9]*) die "port must be a number, got '$PORT'" ;; esac
-{ [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } || die "port must be 1-65535"
-[ -f "$HERE/www/index.html" ] || die "www/index.html not found next to install.sh"
+for f in bin/nexusd bin/nexus-backend www/index.html etc/nexus/nexus.conf init/nexusd init/nexus-backend; do
+  [ -f "$HERE/$f" ] || die "$f not found next to install.sh - did you unpack the whole archive?"
+done
 
-# Only complain about a busy port if it is not our own instance already on it.
-OLD=$(uci -q get "uhttpd.$NAME.listen_http" || true)
-if [ "$OLD" != "0.0.0.0:$PORT" ]; then
-  if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then
-    die "port $PORT is already in use - pick another: ./install.sh 8081"
-  fi
+PORT="${1:-}"
+if [ -n "$PORT" ]; then
+  case "$PORT" in *[!0-9]*) die "port must be a number, got '$PORT'" ;; esac
+  { [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } || die "port must be 1-65535"
 fi
 
-# ---- install ---------------------------------------------------------------
-# Replace the old build completely so stale hashed files don't pile up in flash.
-rm -rf "$DEST"
-mkdir -p "$DEST"
-cp -R "$HERE/www/." "$DEST/"
+# ---- clean up the previous (static-only) version, if it was installed ------
+if command -v uci >/dev/null 2>&1 && uci -q get uhttpd.nexus >/dev/null 2>&1; then
+  uci -q delete uhttpd.nexus; uci commit uhttpd
+  [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd restart || true
+  echo "Removed the old uhttpd 'nexus' instance (the Go backend serves the UI now)."
+fi
 
-uci -q delete "uhttpd.$NAME" || true
-uci set "uhttpd.$NAME=uhttpd"
-uci add_list "uhttpd.$NAME.listen_http=0.0.0.0:$PORT"
-uci set "uhttpd.$NAME.home=$DEST"
-uci commit uhttpd
+stop_services
 
-"$INIT" enable 2>/dev/null || true   # make sure uhttpd starts at boot
-"$INIT" restart                      # note: LuCI reconnects after ~1 s
+# ---- config (never overwrite the user's edits) -----------------------------
+mkdir -p /etc/nexus/hooks "$APP/data"
+if [ ! -f "$CONF" ]; then
+  cp "$HERE/etc/nexus/nexus.conf" "$CONF"
+else
+  cp "$HERE/etc/nexus/nexus.conf" "$CONF.new"
+  echo "Kept your $CONF (new defaults saved as $CONF.new)"
+fi
+if [ ! -f /etc/nexus/hooks/module-hook.sh ]; then
+  cp "$HERE/etc/nexus/hooks/module-hook.sh" /etc/nexus/hooks/module-hook.sh
+else
+  cp "$HERE/etc/nexus/hooks/module-hook.sh" /etc/nexus/hooks/module-hook.sh.new
+  echo "Kept your pin hook (new template saved as module-hook.sh.new)"
+fi
+chmod 755 /etc/nexus/hooks/module-hook.sh
+
+if [ -n "$PORT" ]; then
+  if grep -q '^listen=' "$CONF"; then sed -i "s|^listen=.*|listen=0.0.0.0:$PORT|" "$CONF"
+  else echo "listen=0.0.0.0:$PORT" >> "$CONF"; fi
+fi
+LISTEN=$(sed -n 's/^listen=//p' "$CONF" | head -n 1)
+PORT="${LISTEN##*:}"; PORT="${PORT:-8080}"
+
+# ---- files -----------------------------------------------------------------
+cp "$HERE/bin/nexusd" /usr/bin/nexusd
+cp "$HERE/bin/nexus-backend" /usr/bin/nexus-backend
+chmod 755 /usr/bin/nexusd /usr/bin/nexus-backend
+rm -rf "$APP/www"; mkdir -p "$APP/www"
+cp -R "$HERE/www/." "$APP/www/"
+cp "$HERE/init/nexusd" /etc/init.d/nexusd
+cp "$HERE/init/nexus-backend" /etc/init.d/nexus-backend
+chmod 755 /etc/init.d/nexusd /etc/init.d/nexus-backend
+
+# ---- start + autostart ------------------------------------------------------
+/etc/init.d/nexusd enable;        /etc/init.d/nexusd start
+/etc/init.d/nexus-backend enable; /etc/init.d/nexus-backend start
 
 # ---- verify + report -------------------------------------------------------
-sleep 1
-if wget -q -O /dev/null "http://127.0.0.1:$PORT/index.html" 2>/dev/null; then
-  echo "OK: web UI is answering on port $PORT"
+sleep 3
+if wget -q -O - "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"daemon":true'; then
+  echo "OK: backend and daemon are running."
+elif wget -q -O /dev/null "http://127.0.0.1:$PORT/api/health" 2>/dev/null; then
+  echo "WARNING: backend answers, but the daemon is not connected - check: logread | grep nexusd" >&2
 else
-  echo "WARNING: nothing answered on 127.0.0.1:$PORT yet - check: logread | grep uhttpd" >&2
+  echo "WARNING: nothing answered on port $PORT - check: logread | grep nexus" >&2
 fi
 
 echo
 echo "Open from a computer in the same network:"
 IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}' || true)
-if [ -n "$IPS" ]; then
-  for ip in $IPS; do echo "  http://$ip:$PORT/"; done
-else
-  echo "  http://<device-ip>:$PORT/"
-fi
+if [ -n "$IPS" ]; then for ip in $IPS; do echo "  http://$ip:$PORT/"; done
+else echo "  http://<device-ip>:$PORT/"; fi
+echo
+echo "Pins are switched by /etc/nexus/hooks/module-hook.sh (needs busybox devmem or devmem2)."
+command -v devmem >/dev/null 2>&1 || command -v devmem2 >/dev/null 2>&1 || echo "WARNING: no devmem/devmem2 found - install one, otherwise pins cannot be switched." >&2

@@ -11,6 +11,7 @@ const RANGES = [
 export default function MonitoringPage() {
   const info = useMetricsStore((s) => s.latest);
   const history = useMetricsStore((s) => s.history);
+  const offline = useMetricsStore((s) => s.offline);
   const [range, setRange] = useState<(typeof RANGES)[number]['id']>('5m');
 
   const windowed = useMemo(() => {
@@ -22,7 +23,24 @@ export default function MonitoringPage() {
   const cpu = useMemo(() => windowed.map((p) => ({ t: p.sampledAt, v: p.cpuUsagePercent })), [windowed]);
   const ram = useMemo(() => windowed.map((p) => ({ t: p.sampledAt, v: p.ramUsedMb })), [windowed]);
 
-  if (!info) return <div style={{ padding: 24 }}>Загрузка…</div>;
+  if (!info) {
+    return (
+      <div style={{ padding: 24 }}>
+        <h1 style={{ fontSize: 18, marginBottom: 16 }}>Мониторинг</h1>
+        {offline ? (
+          <div className="card" style={{ padding: 16, maxWidth: 560, borderColor: 'var(--danger)' }} role="alert">
+            <b>Нет данных от контроллера</b>
+            <div style={{ color: 'var(--muted)', marginTop: 6, fontSize: 13 }}>
+              Backend не отвечает или не запущен daemon <code>nexusd</code>. Проверьте на устройстве:
+              <code> logread | grep nexus</code>. Страница обновится сама, когда данные появятся.
+            </div>
+          </div>
+        ) : (
+          'Загрузка…'
+        )}
+      </div>
+    );
+  }
 
   const ramPct = Math.round((info.ramUsedMb / info.ramTotalMb) * 100);
   const diskPct = Math.round((info.diskUsedMb / info.diskTotalMb) * 100);

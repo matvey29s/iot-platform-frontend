@@ -9,7 +9,7 @@ export const PORT_IDS = ['power', 'ethernet1', 'ethernet2', 'usb', 'audioIn', 'a
 interface Props {
   ports: PortState[];
   onHover: (id: string | null) => void;
-  onContextMenu: (id: string) => void;
+  onContextMenu: (id: string, x: number, y: number) => void;
 }
 
 /**
@@ -22,6 +22,11 @@ interface Props {
  */
 export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // listeners are attached once; keep the newest callbacks in refs so they never go stale
+  const hoverRef = useRef(onHover);
+  const ctxRef = useRef(onContextMenu);
+  hoverRef.current = onHover;
+  ctxRef.current = onContextMenu;
 
   // Wire interactions once, directly on the SVG's own elements.
   useEffect(() => {
@@ -42,11 +47,12 @@ export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) 
       el.style.cursor = 'pointer';
       el.setAttribute('tabindex', '0');
 
-      const enter = () => onHover(id);
-      const leave = () => onHover(null);
+      const enter = () => hoverRef.current(id);
+      const leave = () => hoverRef.current(null);
       const ctx = (e: Event) => {
         e.preventDefault();
-        onContextMenu(id);
+        const m = e as MouseEvent;
+        ctxRef.current(id, m.clientX, m.clientY);
       };
 
       el.addEventListener('mouseenter', enter);

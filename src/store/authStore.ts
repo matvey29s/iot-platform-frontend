@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import * as api from '../api/mockApi';
+import * as api from '../api';
 
 interface AuthState {
   token: string | null;

@@ -14,7 +14,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
-import * as api from '../api/mockApi';
+import * as api from '../api';
 import type { ScenarioGraph, ScenarioNodeData, ScenarioNodeType, ScenarioRunStatus } from '../api/types';
 import { NODE_DEFS, defaultConfigFor } from '../scenario/nodeDefs';
 import CustomNode from '../scenario/CustomNode';
