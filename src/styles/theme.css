@@ -1,0 +1,81 @@
+:root {
+  /* Primary system color -- placeholder pending your brandbook/exact HEX.
+     Change this one value to re-theme the whole app. */
+  --brand: #0B3D91;
+  --brand-light: #1C5FC4;
+  --brand-dark: #072A66;
+
+  --bg: var(--brand);
+  --surface: #0f296b;
+  --surface-2: #123073;
+  --border: #2a4f9e;
+
+  --text: #eef2fb;
+  --muted: #9fb2de;
+
+  --accent: #1C99FF;
+  --success: #2ecf7a;
+  --danger: #ff5c5c;
+  --warning: #ffb020;
+
+  --radius: 10px;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); }
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+a { color: var(--accent); }
+
+.btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* ---- data-viz tokens (validated against the app surface #0f296b) ---- */
+:root {
+  --viz-surface: #0f296b;
+  --viz-ink: #eef2fb;
+  --viz-muted: #9fb2de;
+  --viz-grid: rgba(159, 178, 222, 0.16);
+  --viz-cpu: #3987e5;
+  --viz-ram: #d95926;
+}
+
+.seg {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.seg.on { background: var(--surface); color: var(--text); font-weight: 600; }
+.seg:focus-visible, svg rect:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
