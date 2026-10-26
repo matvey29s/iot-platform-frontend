@@ -1,26 +1,28 @@
 import { useEffect, useRef } from 'react';
 import rawSvg from '../assets/Web_GUI.svg?raw';
-import type { PortState } from '../api/types';
+import type { IOState, PortState } from '../api/types';
 
-// Must match the <g id="..."> groups actually present in Web_GUI.svg.
-// This is the ONLY source of the device artwork used anywhere in the app.
-export const PORT_IDS = ['power', 'ethernet1', 'ethernet2', 'usb', 'audioIn', 'audioOut', 'sdcard', 'lcd', 'modules'];
+// Must match the ids present in Web_GUI.svg. This file is the ONLY source of the device artwork.
+export const HOVER_IDS = [
+  'power', 'ethernet1', 'sdcard', 'mpu', 'module1', 'module2',
+  'btn1', 'btn2', 'btn3', 'btn4', 'led1', 'led2', 'led3', 'led4'
+];
 
 interface Props {
   ports: PortState[];
+  io: IOState | null;
   onHover: (id: string | null) => void;
   onContextMenu: (id: string, x: number, y: number) => void;
 }
 
 /**
- * This renders src/assets/Web_GUI.svg byte-for-byte (via Vite's `?raw`
- * import) -- no new shapes, colors or layout are generated. The only thing
- * this component does beyond that is attach event listeners and toggle the
- * existing `.port-fill` element's `fill` style, exactly the technique used
- * (and pixel-verified against the original file) in the standalone HTML/Go
- * build earlier in this project.
+ * Renders src/assets/Web_GUI.svg as it is (Vite `?raw` import); nothing is drawn by code.
+ * State is applied to the artwork's own layers:
+ *  - ports/modules: the coloured fill is cleared when nothing is connected (the white outline stays)
+ *  - LEDs (left): class `on` -> blue dot + glow + rays; the change is animated in CSS (theme.css)
+ *  - buttons (right): class `pressed` -> the plunger slides in and the cap darkens
  */
-export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) {
+export default function DeviceDiagram({ ports, io, onHover, onContextMenu }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   // listeners are attached once; keep the newest callbacks in refs so they never go stale
   const hoverRef = useRef(onHover);
@@ -28,25 +30,20 @@ export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) 
   hoverRef.current = onHover;
   ctxRef.current = onContextMenu;
 
-  // Wire interactions once, directly on the SVG's own elements.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-
     const svgEl = host.querySelector('svg');
     if (svgEl) {
       svgEl.style.width = '100%';
       svgEl.style.height = 'auto';
       svgEl.style.display = 'block';
     }
-
     const cleanups: Array<() => void> = [];
-    for (const id of PORT_IDS) {
+    for (const id of HOVER_IDS) {
       const el = host.querySelector<SVGElement>(`#${id}`);
       if (!el) continue;
-      el.style.cursor = 'pointer';
-      el.setAttribute('tabindex', '0');
-
+      el.style.cursor = id === 'mpu' ? 'default' : 'pointer';
       const enter = () => hoverRef.current(id);
       const leave = () => hoverRef.current(null);
       const ctx = (e: Event) => {
@@ -54,7 +51,6 @@ export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) 
         const m = e as MouseEvent;
         ctxRef.current(id, m.clientX, m.clientY);
       };
-
       el.addEventListener('mouseenter', enter);
       el.addEventListener('mouseleave', leave);
       el.addEventListener('contextmenu', ctx);
@@ -65,40 +61,39 @@ export default function DeviceDiagram({ ports, onHover, onContextMenu }: Props) 
       });
     }
     return () => cleanups.forEach((c) => c());
-    // rawSvg is static, host content doesn't change -- wire once per mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reflect live port state onto the artwork's existing fill/outline layers.
+  // ports + modules
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-
     for (const port of ports) {
       const card = host.querySelector(`#${port.id}`);
-      if (!card) continue;
-      const fillEl = card.querySelector<SVGElement>('.port-fill');
-      if (!fillEl) continue;
-
-      if (fillEl.classList.contains('port-fill-solid')) {
-        // LCD bar: no sibling outline path in the source artwork, so draw
-        // one via stroke when inactive instead of just clearing the fill.
-        if (port.connected) {
-          fillEl.style.fill = '';
-          fillEl.style.stroke = '';
-          fillEl.style.strokeWidth = '';
-        } else {
-          fillEl.style.fill = 'none';
-          fillEl.style.stroke = '#ffffff';
-          fillEl.style.strokeWidth = '1.5';
-        }
-      } else {
-        // Every other port already has a sibling white outline path. Clearing
-        // just the colored fill reveals that outline against the chassis.
-        fillEl.style.fill = port.connected ? '' : 'none';
-      }
+      const fillEl = card?.querySelector<SVGElement>('.port-fill');
+      if (fillEl) fillEl.style.fill = port.connected ? '' : 'none';
     }
   }, [ports]);
+
+  // LEDs: led1 is the power LED (always on), led2..led4 = programmable LED 1..3
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const set = (idx: number, on: boolean) => {
+      host.querySelector(`#led${idx}`)?.classList.toggle('on', on);
+      host.querySelector(`#led${idx}-rays`)?.classList.toggle('on', on);
+    };
+    set(1, true);
+    for (let n = 1; n <= 3; n++) set(n + 1, !!io?.leds.find((l) => l.n === n)?.on);
+  }, [io]);
+
+  // buttons: btn1 is reset (never animated), btn2..btn4 = programmable button 1..3
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    for (let n = 1; n <= 3; n++) {
+      host.querySelector(`#btn${n + 1}`)?.classList.toggle('pressed', !!io?.buttons.find((b) => b.n === n)?.pressed);
+    }
+  }, [io]);
 
   return <div ref={hostRef} style={{ width: '100%' }} dangerouslySetInnerHTML={{ __html: rawSvg }} />;
 }

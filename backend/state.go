@@ -1,30 +1,51 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- JSON shapes shared with the frontend (src/api/types.ts) -------------
 
-type SlotState struct {
-	Slot         int     `json:"slot"`
+type PortState struct {
+	ID           string  `json:"id"`
+	Kind         string  `json:"kind"` // fixed | link | module
 	Connected    bool    `json:"connected"`
-	DetectedType *string `json:"detectedType"` // "rs485" | "relay" | null
-	AdcPercent   float64 `json:"adcPercent"`
-	AdcRaw       int64   `json:"adcRaw"`
-	AdcOk        bool    `json:"adcOk"`
+	Slot         int     `json:"slot,omitempty"`
+	DetectedType *string `json:"detectedType,omitempty"` // modules: "rs485" | "relay"
+	AdcPercent   float64 `json:"adcPercent,omitempty"`
+	AdcRaw       int64   `json:"adcRaw,omitempty"`
+	AdcOk        bool    `json:"adcOk,omitempty"`
+	Relays       []bool  `json:"relays,omitempty"` // relay module: channel states
 }
 
-type PortState struct {
-	ID           string      `json:"id"`
-	Kind         string      `json:"kind"` // fixed | link | module
-	Connected    bool        `json:"connected"`
-	DetectedType *string     `json:"detectedType,omitempty"`
-	Slots        []SlotState `json:"slots,omitempty"`
+type LedState struct {
+	N  int  `json:"n"` // 1..3 (programmable LEDs)
+	On bool `json:"on"`
+}
+
+type ButtonState struct {
+	N             int   `json:"n"` // 1..3 (programmable buttons)
+	Pressed       bool  `json:"pressed"`
+	LastPressedAt int64 `json:"lastPressedAt"` // epoch ms, 0 = never
+}
+
+type IOState struct {
+	Leds    []LedState    `json:"leds"`
+	Buttons []ButtonState `json:"buttons"`
+}
+
+type RS485Entry struct {
+	Slot int    `json:"slot"`
+	Dir  string `json:"dir"` // rx | tx
+	Hex  string `json:"hex"`
+	Text string `json:"text"`
+	TS   int64  `json:"ts"`
 }
 
 type SystemInfo struct {
@@ -46,8 +67,14 @@ type SystemSample struct {
 	RAMTotalMb      float64 `json:"ramTotalMb"`
 }
 
-// History: 15 min at the 3 s sampling period.
-const maxHistory = 300
+const (
+	maxHistory = 300 // 15 min at the 3 s sampling period
+	maxRS485   = 300 // terminal lines kept per slot
+	nSlots     = 2
+	nLeds      = 3
+	nButtons   = 3
+	nRelays    = 4
+)
 
 // ---- persisted data (module settings, register tables, scenarios) --------
 
@@ -55,17 +82,32 @@ type persisted struct {
 	ModuleConfigs map[string]json.RawMessage `json:"moduleConfigs"`
 	Registers     map[string]json.RawMessage `json:"registers"`
 	Scenarios     map[string]json.RawMessage `json:"scenarios"`
+	LastPressed   map[string]int64           `json:"lastPressed"`
+	Running       string                     `json:"running"` // scenario to resume after a reboot
+}
+
+type slotInfo struct {
+	connected bool
+	typ       string
+	pct       float64
+	raw       int64
+	adcOk     bool
+	relays    [nRelays]bool
 }
 
 type Store struct {
 	mu       sync.RWMutex
 	cfg      Config
 	daemonUp bool
-	slots    [2]SlotState
+	slots    [nSlots]slotInfo
+	leds     [nLeds]bool
+	buttons  [nButtons]bool
 	system   *SystemInfo
 	history  []SystemSample
-	links    map[string]bool // ethernet1/2, usb, sdcard... detected by backend
+	links    map[string]bool
+	term     [nSlots][]RS485Entry
 	data     persisted
+	dirty    bool
 	hub      *Hub
 }
 
@@ -75,11 +117,19 @@ func NewStore(cfg Config, hub *Hub) *Store {
 		ModuleConfigs: map[string]json.RawMessage{},
 		Registers:     map[string]json.RawMessage{},
 		Scenarios:     map[string]json.RawMessage{},
-	}
-	for i := range s.slots {
-		s.slots[i].Slot = i + 1
+		LastPressed:   map[string]int64{},
 	}
 	s.load()
+	go func() { // last-press times are flushed lazily so a button does not wear the flash
+		for range time.Tick(30 * time.Second) {
+			s.mu.Lock()
+			if s.dirty {
+				s.dirty = false
+				_ = s.saveLocked()
+			}
+			s.mu.Unlock()
+		}
+	}()
 	return s
 }
 
@@ -103,6 +153,10 @@ func (s *Store) load() {
 	if p.Scenarios != nil {
 		s.data.Scenarios = p.Scenarios
 	}
+	if p.LastPressed != nil {
+		s.data.LastPressed = p.LastPressed
+	}
+	s.data.Running = p.Running
 }
 
 // saveLocked writes atomically (tmp + rename) so a power cut cannot leave a
@@ -122,37 +176,76 @@ func (s *Store) saveLocked() error {
 	return os.Rename(tmp, s.file())
 }
 
+func (s *Store) SetRunning(id string) {
+	s.mu.Lock()
+	s.data.Running = id
+	_ = s.saveLocked()
+	s.mu.Unlock()
+}
+
+func (s *Store) RunningID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.Running
+}
+
+func (s *Store) Scenario(id string) (json.RawMessage, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	raw, ok := s.data.Scenarios[id]
+	return raw, ok
+}
+
 // ---- views ------------------------------------------------------------------
 
-func (s *Store) modulesPortLocked() PortState {
-	p := PortState{ID: "modules", Kind: "module", Slots: append([]SlotState(nil), s.slots[:]...)}
-	for _, sl := range s.slots {
-		if sl.Connected {
-			p.Connected = true
+func moduleID(slot int) string { return "module" + string(rune('0'+slot)) }
+
+func (s *Store) modulePortLocked(i int) PortState {
+	sl := s.slots[i]
+	p := PortState{ID: moduleID(i + 1), Kind: "module", Slot: i + 1, Connected: sl.connected,
+		AdcPercent: sl.pct, AdcRaw: sl.raw, AdcOk: sl.adcOk}
+	if sl.connected {
+		t := sl.typ
+		p.DetectedType = &t
+		if t == "relay" {
+			p.Relays = append([]bool(nil), sl.relays[:]...)
 		}
 	}
 	return p
 }
 
-func (s *Store) ModulesPort() PortState {
+func (s *Store) ModulePort(slot int) PortState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.modulesPortLocked()
+	return s.modulePortLocked(slot - 1)
 }
 
 func (s *Store) Ports() []PortState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	mk := func(id, kind string) PortState { return PortState{ID: id, Kind: kind, Connected: s.links[id]} }
 	return []PortState{
 		{ID: "power", Kind: "fixed", Connected: true}, // we are running, so it is powered
-		mk("ethernet1", "link"), mk("ethernet2", "link"),
-		mk("usb", "fixed"), mk("audioIn", "fixed"), mk("audioOut", "fixed"),
-		mk("sdcard", "fixed"),
-		{ID: "lcd", Kind: "fixed", Connected: true},
-		s.modulesPortLocked(),
+		{ID: "ethernet1", Kind: "link", Connected: s.links["ethernet1"]},
+		{ID: "sdcard", Kind: "fixed", Connected: s.links["sdcard"]},
+		s.modulePortLocked(0),
+		s.modulePortLocked(1),
 	}
 }
+
+func (s *Store) IO() IOState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := IOState{}
+	for i := 0; i < nLeds; i++ {
+		out.Leds = append(out.Leds, LedState{N: i + 1, On: s.leds[i]})
+	}
+	for i := 0; i < nButtons; i++ {
+		out.Buttons = append(out.Buttons, ButtonState{N: i + 1, Pressed: s.buttons[i], LastPressedAt: s.data.LastPressed[itoa(i+1)]})
+	}
+	return out
+}
+
+func itoa(n int) string { return string(rune('0' + n)) }
 
 func (s *Store) System() (SystemInfo, bool) {
 	s.mu.RLock()
@@ -161,6 +254,12 @@ func (s *Store) System() (SystemInfo, bool) {
 		return SystemInfo{}, false
 	}
 	return *s.system, true
+}
+
+func (s *Store) DaemonUp() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.daemonUp
 }
 
 func (s *Store) History(minutes int) []SystemSample {
@@ -179,14 +278,46 @@ func (s *Store) History(minutes int) []SystemSample {
 func (s *Store) SlotType(slot int) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if slot < 1 || slot > 2 {
+	if slot < 1 || slot > nSlots {
 		return "", false
 	}
 	sl := s.slots[slot-1]
-	if !sl.Connected || sl.DetectedType == nil {
-		return "", false
+	return sl.typ, sl.connected
+}
+
+func (s *Store) Terminal(slot int) []RS485Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if slot < 1 || slot > nSlots {
+		return nil
 	}
-	return *sl.DetectedType, true
+	return append([]RS485Entry{}, s.term[slot-1]...)
+}
+
+// variable lookup for scenario conditions
+func (s *Store) ButtonPressed(n int) (bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if n < 1 || n > nButtons {
+		return false, false
+	}
+	return s.buttons[n-1], true
+}
+func (s *Store) LedOn(n int) (bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if n < 1 || n > nLeds {
+		return false, false
+	}
+	return s.leds[n-1], true
+}
+func (s *Store) RelayOn(slot, ch int) (bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if slot < 1 || slot > nSlots || ch < 1 || ch > nRelays {
+		return false, false
+	}
+	return s.slots[slot-1].relays[ch-1], true
 }
 
 // ---- updates coming from the daemon / pollers --------------------------------
@@ -197,38 +328,110 @@ func (s *Store) SetDaemonUp(up bool) {
 	s.daemonUp = up
 	if !up {
 		for i := range s.slots {
-			s.slots[i] = SlotState{Slot: i + 1}
+			s.slots[i] = slotInfo{}
 		}
 	}
-	p := s.modulesPortLocked()
+	ports := []PortState{s.modulePortLocked(0), s.modulePortLocked(1)}
 	s.mu.Unlock()
 	if changed {
-		s.hub.Publish("port_state", p)
+		for _, p := range ports {
+			s.hub.Publish("port_state", p)
+		}
 	}
 }
 
 func (s *Store) UpdateSlot(slot int, module string, raw int64, pct float64, adcOk bool) {
-	if slot < 1 || slot > 2 {
+	if slot < 1 || slot > nSlots {
 		return
 	}
 	s.mu.Lock()
 	sl := &s.slots[slot-1]
 	old := *sl
-	sl.Slot = slot
-	sl.AdcRaw, sl.AdcPercent, sl.AdcOk = raw, pct, adcOk
+	sl.raw, sl.pct, sl.adcOk = raw, pct, adcOk
 	if module == "rs485" || module == "relay" {
-		m := module
-		sl.Connected, sl.DetectedType = true, &m
+		sl.connected, sl.typ = true, module
 	} else {
-		sl.Connected, sl.DetectedType = false, nil
+		sl.connected, sl.typ = false, ""
+		sl.relays = [nRelays]bool{}
 	}
-	typeChanged := old.Connected != sl.Connected || (old.DetectedType == nil) != (sl.DetectedType == nil) ||
-		(old.DetectedType != nil && sl.DetectedType != nil && *old.DetectedType != *sl.DetectedType)
-	p := s.modulesPortLocked()
+	changed := old.connected != sl.connected || old.typ != sl.typ || old.adcOk != sl.adcOk
+	p := s.modulePortLocked(slot - 1)
 	s.mu.Unlock()
-	if typeChanged {
+	if changed {
 		s.hub.Publish("port_state", p)
+	} else {
+		s.hub.Publish("port_adc", map[string]any{"id": p.ID, "adcPercent": pct, "adcRaw": raw})
 	}
+}
+
+func (s *Store) UpdateRelay(slot int, states []int) {
+	if slot < 1 || slot > nSlots {
+		return
+	}
+	s.mu.Lock()
+	sl := &s.slots[slot-1]
+	for i := 0; i < nRelays && i < len(states); i++ {
+		sl.relays[i] = states[i] != 0
+	}
+	p := s.modulePortLocked(slot - 1)
+	s.mu.Unlock()
+	s.hub.Publish("port_state", p)
+}
+
+func (s *Store) UpdateButton(n int, pressed bool, ts int64) {
+	if n < 1 || n > nButtons {
+		return
+	}
+	s.mu.Lock()
+	s.buttons[n-1] = pressed
+	if pressed {
+		s.data.LastPressed[itoa(n)] = ts
+		s.dirty = true
+	}
+	st := ButtonState{N: n, Pressed: pressed, LastPressedAt: s.data.LastPressed[itoa(n)]}
+	s.mu.Unlock()
+	s.hub.Publish("io_button", st)
+}
+
+func (s *Store) UpdateLed(n int, on bool) {
+	if n < 1 || n > nLeds {
+		return
+	}
+	s.mu.Lock()
+	s.leds[n-1] = on
+	s.mu.Unlock()
+	s.hub.Publish("io_led", LedState{N: n, On: on})
+}
+
+func (s *Store) AddRS485(slot int, dir string, raw []byte, ts int64) {
+	if slot < 1 || slot > nSlots {
+		return
+	}
+	e := RS485Entry{Slot: slot, Dir: dir, Hex: hex.EncodeToString(raw), Text: printable(raw), TS: ts}
+	s.mu.Lock()
+	t := append(s.term[slot-1], e)
+	if len(t) > maxRS485 {
+		t = t[len(t)-maxRS485:]
+	}
+	s.term[slot-1] = t
+	s.mu.Unlock()
+	s.hub.Publish("rs485_data", e)
+}
+
+// printable: ASCII view of a frame, non-printable bytes shown as '.'
+func printable(b []byte) string {
+	out := make([]rune, 0, len(b))
+	for _, c := range b {
+		if c >= 0x20 && c < 0x7f {
+			out = append(out, rune(c))
+		} else {
+			out = append(out, '.')
+		}
+	}
+	if !utf8.ValidString(string(out)) {
+		return ""
+	}
+	return string(out)
 }
 
 func (s *Store) UpdateSystem(si SystemInfo) {
@@ -248,13 +451,10 @@ func (s *Store) SetLink(id string, up bool) {
 	s.links[id] = up
 	s.mu.Unlock()
 	if !seen || old != up {
-		s.hub.Publish("port_state", PortState{ID: id, Kind: kindOf(id), Connected: up})
+		kind := "fixed"
+		if id == "ethernet1" {
+			kind = "link"
+		}
+		s.hub.Publish("port_state", PortState{ID: id, Kind: kind, Connected: up})
 	}
-}
-
-func kindOf(id string) string {
-	if id == "ethernet1" || id == "ethernet2" {
-		return "link"
-	}
-	return "fixed"
 }

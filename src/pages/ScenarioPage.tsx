@@ -98,6 +98,7 @@ function ScenarioEditor() {
       loadedRef.current = true;
     })();
 
+    api.fetchScenarioStatus().then((st) => !cancelled && setStatus(st)).catch(() => {});
     const unsub = api.subscribeLive((event) => {
       if (event.type === 'scenario_status') setStatus(event.payload);
     });
@@ -169,7 +170,8 @@ function ScenarioEditor() {
   async function handleRun() {
     const payload = toStoredGraph(nodes, edges);
     await api.saveScenario({ id: SCENARIO_ID, name: 'Основной сценарий', ...payload });
-    await api.startScenario(SCENARIO_ID);
+    const res = await api.startScenario(SCENARIO_ID);
+    if (!res.ok) setStatus((s) => ({ ...s, running: false, lastError: res.error ?? 'Не удалось запустить сценарий' }));
   }
 
   async function handleStop() {
@@ -227,7 +229,13 @@ function Toolbar({
       <span style={{ fontSize: 11, color: 'var(--muted)' }}>
         {lastSavedAt ? `Сохранено автоматически в ${lastSavedAt.toLocaleTimeString('ru-RU')}` : 'Загрузка…'}
       </span>
+      {status.lastError && (
+        <span style={{ fontSize: 11, color: 'var(--danger)' }} role="alert" title={status.lastError}>
+          ⚠ {status.lastError}
+        </span>
+      )}
       <div style={{ flex: 1 }} />
+      {status.running && <span style={{ fontSize: 11, color: 'var(--muted)' }}>Изменения применятся после перезапуска</span>}
       {status.running ? (
         <button className="btn" onClick={onStop}>Стоп</button>
       ) : (

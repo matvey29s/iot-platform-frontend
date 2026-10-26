@@ -12,13 +12,27 @@ import (
 // SSE instead of WebSocket: plain HTTP, browser reconnects by itself, and the
 // Go standard library is enough (no third-party dependency on the device).
 type Hub struct {
-	mu   sync.Mutex
-	subs map[chan []byte]struct{}
+	mu        sync.Mutex
+	subs      map[chan []byte]struct{}
+	listeners []func(typ string, payload any) // in-process consumers (scenario engine); must not block
+}
+
+// OnEvent registers an in-process listener for every published event.
+func (h *Hub) OnEvent(f func(typ string, payload any)) {
+	h.mu.Lock()
+	h.listeners = append(h.listeners, f)
+	h.mu.Unlock()
 }
 
 func NewHub() *Hub { return &Hub{subs: map[chan []byte]struct{}{}} }
 
 func (h *Hub) Publish(typ string, payload any) {
+	h.mu.Lock()
+	ls := append([]func(string, any){}, h.listeners...)
+	h.mu.Unlock()
+	for _, f := range ls {
+		f(typ, payload)
+	}
 	b, err := json.Marshal(map[string]any{"type": typ, "payload": payload})
 	if err != nil {
 		return

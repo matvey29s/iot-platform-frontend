@@ -58,13 +58,19 @@ function summarize(data: ScenarioNodeData): string {
     case 'while':
       return `${c.variable ?? '?'} ${c.operator ?? ''} ${c.value ?? ''}`;
     case 'rs485_receive':
-      return `массив: ${c.arrayName ?? '?'}`;
+      return `модуль ${c.slot ?? 1}`;
     case 'rs485_parse':
       return `регистров: ${Array.isArray(c.registerTable) ? c.registerTable.length : 0}`;
     case 'rs485_send':
-      return `формат: ${c.format ?? '?'}`;
+      return `модуль ${c.slot ?? 1}: ${c.mode ?? 'Текст'}`;
     case 'relay_set':
-      return `канал ${c.channel ?? '?'} → ${c.state ?? '?'}`;
+      return `модуль ${c.slot ?? 1}, канал ${c.channel ?? '?'} → ${c.state ?? '?'}`;
+    case 'button_event':
+      return `кнопка ${c.button ?? 1}: ${c.event === 'released' ? 'отпущена' : 'нажата'}`;
+    case 'led_set':
+      return `светодиод ${c.led ?? 1} → ${c.state ?? '?'}`;
+    case 'delay':
+      return `${c.ms ?? 0} мс`;
     default:
       return '';
   }

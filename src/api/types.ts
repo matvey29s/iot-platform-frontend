@@ -16,23 +16,22 @@ export interface AuthResult {
 
 export type PortKind = 'fixed' | 'link' | 'module';
 
-/** One expansion slot behind the "modules" port. Slot 1 = ADC channel 0, slot 2 = ADC channel 1. */
-export interface SlotState {
-  slot: number; // 1 | 2
-  connected: boolean;
-  /** Resolved by the daemon from the ADC level (~20% RS-485, ~50% relay). */
-  detectedType: ModuleType | null;
-  adcPercent: number;
-  adcRaw: number;
-  adcOk: boolean;
-}
-
+/**
+ * Ports drawn in the SVG: power, ethernet1, sdcard (fixed/link) and module1, module2
+ * (expansion slots; slot 1 = ADC channel 0, slot 2 = ADC channel 1).
+ */
 export interface PortState {
   id: string;
   kind: PortKind;
   connected: boolean;
-  /** Only for the "modules" port: the two expansion slots. */
-  slots?: SlotState[];
+  slot?: number;
+  /** Modules only: resolved by the daemon from the ADC level (~16.4% RS-485, ~91.6% relay, +-5%). */
+  detectedType?: ModuleType | null;
+  adcPercent?: number;
+  adcRaw?: number;
+  adcOk?: boolean;
+  /** Relay modules only: state of channels 1..4. */
+  relays?: boolean[];
 }
 
 export type ModuleType = 'rs485' | 'relay';
@@ -61,7 +60,10 @@ export type ScenarioNodeType =
   | 'rs485_receive'
   | 'rs485_parse'
   | 'rs485_send'
-  | 'relay_set';
+  | 'relay_set'
+  | 'button_event'
+  | 'led_set'
+  | 'delay';
 
 export interface RegisterTableRow {
   byteIndex: number;
@@ -87,6 +89,34 @@ export interface ScenarioRunStatus {
   running: boolean;
   activeNodeId: string | null;
   lastError: string | null;
+}
+
+// ---- Buttons, LEDs, RS-485 terminal ------------------------------------------------
+
+export interface LedState {
+  n: number; // 1..3 (programmable)
+  on: boolean;
+}
+export interface ButtonState {
+  n: number; // 1..3 (programmable)
+  pressed: boolean;
+  lastPressedAt: number; // epoch ms, 0 = never
+}
+export interface IOState {
+  leds: LedState[];
+  buttons: ButtonState[];
+}
+export interface RS485Entry {
+  slot: number;
+  dir: 'rx' | 'tx';
+  hex: string;
+  text: string;
+  ts: number;
+}
+export interface RS485SendRequest {
+  mode: 'text' | 'hex';
+  data: string;
+  eol: 'none' | 'cr' | 'lf' | 'crlf';
 }
 
 // ---- Monitoring tab -----------------------------------------------------------
@@ -118,4 +148,8 @@ export type LiveEvent =
   | { type: 'port_state'; payload: PortState }
   | { type: 'register_value'; payload: { device: string; index: number; value: number } }
   | { type: 'scenario_status'; payload: ScenarioRunStatus }
-  | { type: 'system_info'; payload: SystemInfo };
+  | { type: 'system_info'; payload: SystemInfo }
+  | { type: 'port_adc'; payload: { id: string; adcPercent: number; adcRaw: number } }
+  | { type: 'io_led'; payload: LedState }
+  | { type: 'io_button'; payload: ButtonState }
+  | { type: 'rs485_data'; payload: RS485Entry };

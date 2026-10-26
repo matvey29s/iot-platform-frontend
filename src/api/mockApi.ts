@@ -1,5 +1,8 @@
 import type {
   AuthResult,
+  IOState,
+  RS485Entry,
+  RS485SendRequest,
   LiveEvent,
   ModuleConfig,
   PortState,
@@ -59,33 +62,18 @@ function seed() {
   // being served over it (mirrors the earlier Go backend's demo defaults)
   db.ports.set('power', { id: 'power', kind: 'fixed', connected: true });
   db.ports.set('ethernet1', { id: 'ethernet1', kind: 'link', connected: true });
-  db.ports.set('ethernet2', { id: 'ethernet2', kind: 'link', connected: false });
-  db.ports.set('usb', { id: 'usb', kind: 'fixed', connected: false });
-  db.ports.set('audioIn', { id: 'audioIn', kind: 'fixed', connected: false });
-  db.ports.set('audioOut', { id: 'audioOut', kind: 'fixed', connected: false });
   db.ports.set('sdcard', { id: 'sdcard', kind: 'fixed', connected: true });
-  db.ports.set('lcd', { id: 'lcd', kind: 'fixed', connected: true });
-
-  // "modules" bay: demo default = RS-485 already plugged in
-  db.ports.set('modules', {
-    id: 'modules',
-    kind: 'module',
-    connected: true,
-    slots: [
-      { slot: 1, connected: true, detectedType: 'rs485', adcPercent: 20, adcRaw: 819, adcOk: true },
-      { slot: 2, connected: true, detectedType: 'relay', adcPercent: 50, adcRaw: 2048, adcOk: true }
-    ]
-  });
+  db.ports.set('module1', { id: 'module1', kind: 'module', slot: 1, connected: true, detectedType: 'rs485', adcPercent: 16.4, adcRaw: 671, adcOk: true });
+  db.ports.set('module2', { id: 'module2', kind: 'module', slot: 2, connected: true, detectedType: 'relay', adcPercent: 91.6, adcRaw: 3751, adcOk: true, relays: [false, true, false, false] });
   db.moduleConfigs.set('module1', {
     baudRate: 9600,
     parity: 'none',
     dataBits: 8,
     stopBits: 1,
-    devicePath: '/dev/ttyRS485-1',
+    devicePath: '/dev/ttyS1',
     protocol: 'modbus_rtu'
   } as Rs485Config);
-
-  db.moduleConfigs.set('module2', { channels: 8, safeState: 'all_off' } as RelayConfig);
+  db.moduleConfigs.set('module2', { channels: 4, safeState: 'all_off' } as RelayConfig);
 
   db.registerTables.set('module1', [
     { byteIndex: 0, name: 'temperature', dataType: 'int16', description: 'Температура, x0.1°C' },
@@ -117,14 +105,35 @@ export async function fetchModuleConfig(portId: string): Promise<ModuleConfig | 
   return db.moduleConfigs.get(portId) ?? null;
 }
 
+export async function fetchIO(): Promise<IOState> {
+  await delay(100);
+  return {
+    leds: [1, 2, 3].map((n) => ({ n, on: n === 2 })),
+    buttons: [1, 2, 3].map((n) => ({ n, pressed: false, lastPressedAt: n === 1 ? Date.now() - 125000 : 0 }))
+  };
+}
+
+const mockLog: RS485Entry[] = [];
+export async function fetchRs485Log(_slot: number): Promise<RS485Entry[]> {
+  return [...mockLog];
+}
+export async function sendRs485(slot: number, req: RS485SendRequest): Promise<{ ok: boolean; error?: string }> {
+  const e: RS485Entry = { slot, dir: 'tx', hex: req.mode === 'hex' ? req.data.replace(/\s/g, '') : Array.from(req.data).map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join(''), text: req.data, ts: Date.now() };
+  mockLog.push(e);
+  emit({ type: 'rs485_data', payload: e });
+  return { ok: true };
+}
+export async function fetchScenarioStatus(): Promise<ScenarioRunStatus> {
+  return { ...db.scenarioStatus };
+}
+
 export async function saveModuleConfig(
   portId: string,
   config: ModuleConfig
 ): Promise<{ ok: boolean; error?: string }> {
   await delay(300);
   const port = db.ports.get(portId);
-  const slot = db.ports.get('modules')?.slots?.find((x) => `module${x.slot}` === portId);
-  if (!port && !slot?.connected) {
+  if (!port || !port.connected) {
     return { ok: false, error: 'Модуль не обнаружен в данном слоте' };
   }
   db.moduleConfigs.set(portId, config);
@@ -238,7 +247,7 @@ let simTick = 0;
 function tickSim() {
   simTick += 1;
 
-  if (db.ports.get('modules')?.connected) {
+  if (db.ports.get('module1')?.connected) {
     emit({
       type: 'register_value',
       payload: { device: 'RS485-1', index: 0, value: 200 + Math.round(Math.sin(simTick / 5) * 30) }

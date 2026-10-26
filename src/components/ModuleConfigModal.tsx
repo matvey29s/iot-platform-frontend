@@ -13,11 +13,11 @@ const DEFAULT_RS485: Rs485Config = {
   parity: 'none',
   dataBits: 8,
   stopBits: 1,
-  devicePath: '/dev/ttyRS485-1',
+  devicePath: '/dev/ttyS1',
   protocol: 'modbus_rtu'
 };
 
-const DEFAULT_RELAY: RelayConfig = { channels: 8, safeState: 'all_off' };
+const DEFAULT_RELAY: RelayConfig = { channels: 4, safeState: 'all_off' };
 
 export default function ModuleConfigModal({ portId, moduleType, onClose }: Props) {
   const [tab, setTab] = useState<'port' | 'registers'>('port');
@@ -86,7 +86,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
           <form onSubmit={savePort} style={styles.form}>
             <Field label="Скорость (бод)">
               <select value={rs485.baudRate} onChange={(e) => setRs485({ ...rs485, baudRate: Number(e.target.value) })}>
-                {[1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200].map((b) => (
+                {[1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600].map((b) => (
                   <option key={b} value={b}>{b}</option>
                 ))}
               </select>
@@ -111,7 +111,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
               </select>
             </Field>
             <Field label="Путь до устройства">
-              <input value={rs485.devicePath} onChange={(e) => setRs485({ ...rs485, devicePath: e.target.value })} />
+              <input value={rs485.devicePath} readOnly title="Определяется платой (nexus.conf: uart_dev1/uart_dev2)" />
             </Field>
             <Field label="Протокол">
               <select value={rs485.protocol} onChange={(e) => setRs485({ ...rs485, protocol: e.target.value as Rs485Config['protocol'] })}>
@@ -158,7 +158,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
         {moduleType === 'relay' && (
           <form onSubmit={savePort} style={styles.form}>
             <Field label="Число каналов">
-              <input type="number" min={1} max={16} value={relay.channels} onChange={(e) => setRelay({ ...relay, channels: Number(e.target.value) })} />
+              <input type="number" min={1} max={4} value={relay.channels} onChange={(e) => setRelay({ ...relay, channels: Number(e.target.value) })} />
             </Field>
             <Field label="Состояние при потере связи">
               <select value={relay.safeState} onChange={(e) => setRelay({ ...relay, safeState: e.target.value as RelayConfig['safeState'] })}>

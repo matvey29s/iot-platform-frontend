@@ -3,7 +3,8 @@ import { NodeIcon } from './NodeIcons';
 import type { ScenarioNodeType } from '../api/types';
 
 const GROUPS: { title: string; types: ScenarioNodeType[] }[] = [
-  { title: 'Логика', types: ['if_else', 'while'] },
+  { title: 'Логика', types: ['if_else', 'while', 'delay'] },
+  { title: 'Кнопки и светодиоды', types: ['button_event', 'led_set'] },
   { title: 'RS-485', types: ['rs485_receive', 'rs485_parse', 'rs485_send'] },
   { title: 'Реле', types: ['relay_set'] }
 ];

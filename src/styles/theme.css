@@ -79,3 +79,26 @@ a { color: var(--accent); }
 }
 .seg.on { background: var(--surface); color: var(--text); font-weight: 600; }
 .seg:focus-visible, svg rect:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- device picture: LED and button animation (classes are set by DeviceDiagram) ---- */
+.led-dot { fill: #f7f7f7; transition: fill 0.28s ease, filter 0.28s ease; }
+.led-dot.on { fill: #0015ff; filter: drop-shadow(0 0 4px rgba(40, 70, 255, 0.95)); }
+
+.led-rays { opacity: 0; transition: opacity 0.28s ease; }
+.led-rays.on { opacity: 1; }
+.led-rays .rays-inner {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scale(0.35);
+  transition: transform 0.35s cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+.led-rays.on .rays-inner { transform: scale(1); }
+
+.btn-hw .btn-plunger-g { transition: transform 0.09s ease-out; }
+.btn-hw .btn-cap { transition: fill 0.09s ease-out; }
+.btn-hw.pressed .btn-plunger-g { transform: translateX(-5px); }
+.btn-hw.pressed .btn-cap { fill: #9b9292; }
+
+@media (prefers-reduced-motion: reduce) {
+  .led-dot, .led-rays, .led-rays .rays-inner, .btn-hw .btn-plunger-g, .btn-hw .btn-cap { transition: none; }
+}

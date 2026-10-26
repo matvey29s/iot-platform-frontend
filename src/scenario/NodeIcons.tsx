@@ -90,13 +90,48 @@ export function RelayIcon({ size = 22, color = 'currentColor' }: IconProps) {
   );
 }
 
+/** Button: a square key with a round cap being pressed down. */
+export function ButtonIcon({ size = 22, color = 'currentColor' }: IconProps) {
+  return (
+    <svg {...base(size, color)}>
+      <rect x="2.6" y="11.5" width="18.8" height="9.2" rx="2.4" />
+      <circle cx="12" cy="7.6" r="3.6" />
+      <path d="M12 12.3v-1.2" />
+      <path d="M6.5 16h2M15.5 16h2" />
+    </svg>
+  );
+}
+
+/** LED: a lit bulb with short rays (the same grammar as the LED on the device picture). */
+export function LedIcon({ size = 22, color = 'currentColor' }: IconProps) {
+  return (
+    <svg {...base(size, color)}>
+      <circle cx="12" cy="12" r="4.2" fill={color} stroke="none" />
+      <path d="M12 2.4v3M12 18.6v3M2.4 12h3M18.6 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" />
+    </svg>
+  );
+}
+
+/** Delay: a stopwatch. */
+export function DelayIcon({ size = 22, color = 'currentColor' }: IconProps) {
+  return (
+    <svg {...base(size, color)}>
+      <circle cx="12" cy="13.4" r="7.4" />
+      <path d="M12 13.4V9M9.6 2.8h4.8M12 2.8v3.2M19 6.2l1.4-1.4" />
+    </svg>
+  );
+}
+
 const ICONS: Record<ScenarioNodeType, (p: IconProps) => JSX.Element> = {
   if_else: IfElseIcon,
   while: WhileIcon,
   rs485_receive: Rs485ReceiveIcon,
   rs485_parse: Rs485ParseIcon,
   rs485_send: Rs485SendIcon,
-  relay_set: RelayIcon
+  relay_set: RelayIcon,
+  button_event: ButtonIcon,
+  led_set: LedIcon,
+  delay: DelayIcon
 };
 
 export function NodeIcon({ type, size = 22, color }: { type: ScenarioNodeType } & IconProps) {

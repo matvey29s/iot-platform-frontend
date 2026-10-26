@@ -12,6 +12,10 @@ const impl: typeof real = useMock ? (mock as unknown as typeof real) : real;
 
 export const login = impl.login;
 export const fetchPorts = impl.fetchPorts;
+export const fetchIO = impl.fetchIO;
+export const fetchRs485Log = impl.fetchRs485Log;
+export const sendRs485 = impl.sendRs485;
+export const fetchScenarioStatus = impl.fetchScenarioStatus;
 export const fetchModuleConfig = impl.fetchModuleConfig;
 export const saveModuleConfig = impl.saveModuleConfig;
 export const fetchRegisterTable = impl.fetchRegisterTable;

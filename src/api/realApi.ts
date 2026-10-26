@@ -1,5 +1,9 @@
 import type {
   AuthResult,
+  IOState,
+  RS485Entry,
+  RS485SendRequest,
+  ScenarioRunStatus,
   LiveEvent,
   ModuleConfig,
   PortState,
@@ -64,6 +68,22 @@ export async function saveRegisterTable(deviceId: string, rows: RegisterTableRow
   }
 }
 
+export function fetchIO(): Promise<IOState> {
+  return http<IOState>('GET', 'io');
+}
+
+export function fetchRs485Log(slot: number): Promise<RS485Entry[]> {
+  return http<RS485Entry[]>('GET', `rs485/${slot}/log`).catch(() => []);
+}
+
+export async function sendRs485(slot: number, req: RS485SendRequest): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('POST', `rs485/${slot}/send`, req);
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
+}
+
 // ---- Scenario --------------------------------------------------------------
 
 export function fetchScenarios(): Promise<ScenarioGraph[]> {
@@ -77,6 +97,10 @@ export async function saveScenario(graph: ScenarioGraph): Promise<{ ok: boolean;
     // the browser copy (localStorage) is the source of truth for now; never throw into autosave
     return { ok: false, error: NO_LINK };
   }
+}
+
+export function fetchScenarioStatus(): Promise<ScenarioRunStatus> {
+  return http<ScenarioRunStatus>('GET', 'scenarios/status');
 }
 
 export async function startScenario(id: string): Promise<{ ok: boolean; error?: string }> {

@@ -25,11 +25,11 @@ type RelayConfig struct {
 }
 
 type API struct {
-	st     *Store
-	dc     *DaemonClient
-	hub    *Hub
-	cfg    Config
-	device [2]string
+	st  *Store
+	dc  *DaemonClient
+	en  *Engine
+	hub *Hub
+	cfg Config
 }
 
 func (a *API) routes() http.Handler {
@@ -47,6 +47,10 @@ func (a *API) routes() http.Handler {
 	mux.HandleFunc("PUT /api/scenarios/{id}", a.putScenario)
 	mux.HandleFunc("POST /api/scenarios/{id}/start", a.startScenario)
 	mux.HandleFunc("POST /api/scenarios/{id}/stop", a.stopScenario)
+	mux.HandleFunc("GET /api/scenarios/status", a.scenarioStatus)
+	mux.HandleFunc("GET /api/io", a.io)
+	mux.HandleFunc("GET /api/rs485/{slot}/log", a.rs485Log)
+	mux.HandleFunc("POST /api/rs485/{slot}/send", a.rs485Send)
 	mux.Handle("GET /api/events", a.hub)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "unknown endpoint"})
@@ -137,7 +141,7 @@ func (a *API) defaultConfig(id string) (any, bool) {
 	if typ == "rs485" {
 		return Rs485Config{9600, "none", 8, 1, a.cfg.UartDev[slot-1], "modbus_rtu"}, true
 	}
-	return RelayConfig{8, "all_off"}, true
+	return RelayConfig{4, "all_off"}, true
 }
 
 func (a *API) getModuleConfig(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +179,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 	switch typ {
 	case "rs485":
 		var c Rs485Config
-		if json.Unmarshal(body, &c) != nil || c.BaudRate < 300 || c.BaudRate > 4000000 ||
+		if json.Unmarshal(body, &c) != nil || c.BaudRate < 1200 || c.BaudRate > 921600 ||
 			(c.Parity != "none" && c.Parity != "even" && c.Parity != "odd") ||
 			(c.DataBits != 7 && c.DataBits != 8) || (c.StopBits != 1 && c.StopBits != 2) ||
 			(c.Protocol != "modbus_rtu" && c.Protocol != "modbus_ascii") {
@@ -190,7 +194,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 		store = c
 	default:
 		var c RelayConfig
-		if json.Unmarshal(body, &c) != nil || c.Channels < 1 || c.Channels > 64 ||
+		if json.Unmarshal(body, &c) != nil || c.Channels < 1 || c.Channels > 4 ||
 			(c.SafeState != "keep" && c.SafeState != "all_off" && c.SafeState != "all_on") {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": "Недопустимые параметры реле"})
 			return
@@ -269,11 +273,79 @@ func (a *API) putScenario(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// Executing scenarios on the device is the next stage (graph -> bytecode).
 func (a *API) startScenario(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": false, "error": "Запуск сценариев на устройстве ещё не реализован"})
+	if err := a.en.Start(r.PathValue("id")); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (a *API) stopScenario(w http.ResponseWriter, r *http.Request) {
+	a.en.StopAndForget()
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (a *API) scenarioStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, a.en.Status())
+}
+
+func (a *API) io(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.st.IO()) }
+
+func (a *API) rs485Log(w http.ResponseWriter, r *http.Request) {
+	slot, _ := strconv.Atoi(r.PathValue("slot"))
+	log := a.st.Terminal(slot)
+	if log == nil {
+		log = []RS485Entry{}
+	}
+	writeJSON(w, 200, log)
+}
+
+// POST {mode:"text"|"hex", data:"...", eol:"none"|"cr"|"lf"|"crlf"}
+func (a *API) rs485Send(w http.ResponseWriter, r *http.Request) {
+	slot, _ := strconv.Atoi(r.PathValue("slot"))
+	var in struct{ Mode, Data, Eol string }
+	body, _ := readBody(r)
+	if json.Unmarshal(body, &in) != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "bad body"})
+		return
+	}
+	if typ, ok := a.st.SlotType(slot); !ok || typ != "rs485" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "В этом слоте нет модуля RS-485"})
+		return
+	}
+	var data []byte
+	if in.Mode == "hex" {
+		clean := strings.Map(func(r rune) rune {
+			if r == ' ' || r == ':' || r == '-' {
+				return -1
+			}
+			return r
+		}, in.Data)
+		b, err := hex.DecodeString(clean)
+		if err != nil || len(b) == 0 {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "Неверный HEX"})
+			return
+		}
+		data = b
+	} else {
+		data = []byte(in.Data)
+	}
+	switch in.Eol {
+	case "cr":
+		data = append(data, '\r')
+	case "lf":
+		data = append(data, '\n')
+	case "crlf":
+		data = append(data, '\r', '\n')
+	}
+	if len(data) == 0 || len(data) > 512 {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "Пустой кадр или длиннее 512 байт"})
+		return
+	}
+	if err := a.dc.RS485Send(slot, data); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

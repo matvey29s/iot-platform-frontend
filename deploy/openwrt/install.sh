@@ -11,26 +11,39 @@
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-CONF=/etc/nexus/nexus.conf
-APP=/opt/nexus-iot
+# NEXUS_ROOT is only for testing the installer on a normal PC (files go under that folder,
+# services are not touched). On the device leave it unset.
+R="${NEXUS_ROOT:-}"
+CONF=$R/etc/nexus/nexus.conf
+APP=$R/opt/nexus-iot
+BIN=$R/usr/bin
+INITD=$R/etc/init.d
+
+svc() { if [ -n "$R" ]; then echo "[test] $*"; else "$@"; fi; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-[ "$(id -u)" = 0 ] || die "run as root"
-[ -d /etc/init.d ] && [ -f /etc/rc.common ] || die "this script is for OpenWrt (no /etc/rc.common)"
+if [ -z "$R" ]; then
+  [ "$(id -u)" = 0 ] || die "run as root"
+  [ -f /etc/rc.common ] || die "this script is for OpenWrt (no /etc/rc.common)"
+fi
 
 stop_services() {
   for s in nexus-backend nexusd; do
-    [ -x "/etc/init.d/$s" ] && { "/etc/init.d/$s" stop 2>/dev/null || true; "/etc/init.d/$s" disable 2>/dev/null || true; }
+    if [ -x "$INITD/$s" ]; then
+      svc "$INITD/$s" stop 2>/dev/null || true
+      svc "$INITD/$s" disable 2>/dev/null || true
+    fi
   done
+  return 0   # (set -e: a false `if` as the last command must not end the script)
 }
 
 # ---- uninstall -------------------------------------------------------------
 case "${1:-}" in
   --remove|--purge)
     stop_services
-    rm -f /usr/bin/nexusd /usr/bin/nexus-backend /etc/init.d/nexusd /etc/init.d/nexus-backend
+    rm -f "$BIN/nexusd" "$BIN/nexus-backend" "$INITD/nexusd" "$INITD/nexus-backend"
     rm -rf "$APP/www"
-    if [ "$1" = "--purge" ]; then rm -rf /etc/nexus "$APP"; else echo "Kept: /etc/nexus and $APP/data"; fi
+    if [ "$1" = "--purge" ]; then rm -rf "$R/etc/nexus" "$APP"; else echo "Kept: $R/etc/nexus and $APP/data"; fi
     echo "Nexus IoT Platform removed."
     exit 0 ;;
 esac
@@ -47,7 +60,7 @@ if [ -n "$PORT" ]; then
 fi
 
 # ---- clean up the previous (static-only) version, if it was installed ------
-if command -v uci >/dev/null 2>&1 && uci -q get uhttpd.nexus >/dev/null 2>&1; then
+if [ -z "$R" ] && command -v uci >/dev/null 2>&1 && uci -q get uhttpd.nexus >/dev/null 2>&1; then
   uci -q delete uhttpd.nexus; uci commit uhttpd
   [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd restart || true
   echo "Removed the old uhttpd 'nexus' instance (the Go backend serves the UI now)."
@@ -56,20 +69,20 @@ fi
 stop_services
 
 # ---- config (never overwrite the user's edits) -----------------------------
-mkdir -p /etc/nexus/hooks "$APP/data"
+mkdir -p "$R/etc/nexus/hooks" "$APP/data"
 if [ ! -f "$CONF" ]; then
   cp "$HERE/etc/nexus/nexus.conf" "$CONF"
 else
   cp "$HERE/etc/nexus/nexus.conf" "$CONF.new"
   echo "Kept your $CONF (new defaults saved as $CONF.new)"
 fi
-if [ ! -f /etc/nexus/hooks/module-hook.sh ]; then
-  cp "$HERE/etc/nexus/hooks/module-hook.sh" /etc/nexus/hooks/module-hook.sh
+if [ ! -f $R/etc/nexus/hooks/module-hook.sh ]; then
+  cp "$HERE/etc/nexus/hooks/module-hook.sh" $R/etc/nexus/hooks/module-hook.sh
 else
-  cp "$HERE/etc/nexus/hooks/module-hook.sh" /etc/nexus/hooks/module-hook.sh.new
+  cp "$HERE/etc/nexus/hooks/module-hook.sh" $R/etc/nexus/hooks/module-hook.sh.new
   echo "Kept your pin hook (new template saved as module-hook.sh.new)"
 fi
-chmod 755 /etc/nexus/hooks/module-hook.sh
+chmod 755 $R/etc/nexus/hooks/module-hook.sh
 
 if [ -n "$PORT" ]; then
   if grep -q '^listen=' "$CONF"; then sed -i "s|^listen=.*|listen=0.0.0.0:$PORT|" "$CONF"
@@ -79,18 +92,19 @@ LISTEN=$(sed -n 's/^listen=//p' "$CONF" | head -n 1)
 PORT="${LISTEN##*:}"; PORT="${PORT:-8080}"
 
 # ---- files -----------------------------------------------------------------
-cp "$HERE/bin/nexusd" /usr/bin/nexusd
-cp "$HERE/bin/nexus-backend" /usr/bin/nexus-backend
-chmod 755 /usr/bin/nexusd /usr/bin/nexus-backend
+mkdir -p "$BIN" "$INITD"
+cp "$HERE/bin/nexusd" "$BIN/nexusd"
+cp "$HERE/bin/nexus-backend" "$BIN/nexus-backend"
+chmod 755 "$BIN/nexusd" "$BIN/nexus-backend"
 rm -rf "$APP/www"; mkdir -p "$APP/www"
 cp -R "$HERE/www/." "$APP/www/"
-cp "$HERE/init/nexusd" /etc/init.d/nexusd
-cp "$HERE/init/nexus-backend" /etc/init.d/nexus-backend
-chmod 755 /etc/init.d/nexusd /etc/init.d/nexus-backend
+cp "$HERE/init/nexusd" "$INITD/nexusd"
+cp "$HERE/init/nexus-backend" "$INITD/nexus-backend"
+chmod 755 "$INITD/nexusd" "$INITD/nexus-backend"
 
 # ---- start + autostart ------------------------------------------------------
-/etc/init.d/nexusd enable;        /etc/init.d/nexusd start
-/etc/init.d/nexus-backend enable; /etc/init.d/nexus-backend start
+svc "$INITD/nexusd" enable;        svc "$INITD/nexusd" start
+svc "$INITD/nexus-backend" enable; svc "$INITD/nexus-backend" start
 
 # ---- verify + report -------------------------------------------------------
 sleep 3

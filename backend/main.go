@@ -21,7 +21,17 @@ func main() {
 	go dc.Run()
 	go pollLinks(st, cfg)
 
-	api := &API{st: st, dc: dc, hub: hub, cfg: cfg}
+	en := NewEngine(st, dc, hub)
+	if id := st.RunningID(); id != "" { // the scenario was running before the reboot: resume it
+		go func() {
+			time.Sleep(4 * time.Second) // let the daemon connect and report the modules first
+			if err := en.Start(id); err != nil {
+				log.Printf("cannot resume scenario %q: %v", id, err)
+			}
+		}()
+	}
+
+	api := &API{st: st, dc: dc, en: en, hub: hub, cfg: cfg}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           api.routes(),
