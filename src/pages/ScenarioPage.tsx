@@ -15,7 +15,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 
 import * as api from '../api';
-import type { ScenarioGraph, ScenarioNodeData, ScenarioNodeType, ScenarioRunStatus } from '../api/types';
+import type { PortState, ScenarioGraph, ScenarioNodeData, ScenarioNodeType, ScenarioRunStatus } from '../api/types';
 import { NODE_DEFS, defaultConfigFor } from '../scenario/nodeDefs';
 import CustomNode from '../scenario/CustomNode';
 import DeletableEdge from '../scenario/DeletableEdge';
@@ -58,6 +58,7 @@ function ScenarioEditor() {
   const [editingNode, setEditingNode] = useState<Node<ScenarioNodeData> | null>(null);
   const [status, setStatus] = useState<ScenarioRunStatus>({ running: false, activeNodeId: null, lastError: null });
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [ports, setPorts] = useState<PortState[]>([]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [rf, setRf] = useState<ReactFlowInstance | null>(null);
   const loadedRef = useRef(false);
@@ -98,9 +99,14 @@ function ScenarioEditor() {
       loadedRef.current = true;
     })();
 
+    api.fetchPorts().then((p) => !cancelled && setPorts(p)).catch(() => {});
     api.fetchScenarioStatus().then((st) => !cancelled && setStatus(st)).catch(() => {});
     const unsub = api.subscribeLive((event) => {
       if (event.type === 'scenario_status') setStatus(event.payload);
+      else if (event.type === 'port_state' && event.payload.kind === 'module') {
+        const p = event.payload;
+        setPorts((prev) => (prev.some((x) => x.id === p.id) ? prev.map((x) => (x.id === p.id ? p : x)) : [...prev, p]));
+      }
     });
     return () => {
       cancelled = true;
@@ -204,7 +210,7 @@ function ScenarioEditor() {
         </div>
       </div>
       <NodePalette />
-      {editingNode && <NodeConfigModal data={editingNode.data} onSave={saveNodeConfig} onClose={() => setEditingNode(null)} />}
+      {editingNode && <NodeConfigModal data={editingNode.data} ports={ports} nodes={nodes} edges={edges} onSave={saveNodeConfig} onClose={() => setEditingNode(null)} />}
     </div>
   );
 }

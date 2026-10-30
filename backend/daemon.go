@@ -89,6 +89,13 @@ func (d *DaemonClient) Run() {
 			if json.Unmarshal(sc.Bytes(), &m) != nil {
 				continue
 			}
+			if m.Type == "eth" {
+				var e EthInfo
+				if json.Unmarshal(sc.Bytes(), &e) == nil {
+					d.store.UpdateEthernet(e)
+				}
+				continue
+			}
 			d.handle(m)
 		}
 		log.Printf("nexusd connection lost: %v", sc.Err())

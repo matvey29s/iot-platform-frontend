@@ -29,8 +29,9 @@ import (
 // Variables usable in if/else and while:
 //   BTN-1..BTN-3      button pressed (1) / released (0)
 //   LED-1..LED-3      LED on (1) / off (0)
-//   RELAY-<slot>.<ch> relay channel on / off, e.g. RELAY-2.1
-//   RS485-<slot>.<i>  value set by an "RS-485 parse" node (i = row number or row name)
+//   Relay-<n>         relay module (single channel) on / off, e.g. Relay-0
+//   RS485-<n>.<i>     value set by an "RS-485 parse" node (i = row number or row name), e.g. RS485-0.TEMP
+// Modules are named per type in slot order (see Store.moduleNamesLocked): RS485-0, RS485-1, Relay-0 ...
 
 type graphNode struct {
 	ID   string `json:"id"`
@@ -241,6 +242,16 @@ type runCtx struct {
 
 func (r *runner) alive() bool { return r.ctx.Err() == nil }
 
+// moduleSlot resolves the "module" setting of a node (e.g. "RS485-0") to a slot number.
+// Scenarios saved by older versions carry a plain "slot" number instead.
+func (e *Engine) moduleSlot(c map[string]interface{}) (slot int, name string) {
+	if n := strings.TrimSpace(cfgStr(c, "module", "")); n != "" {
+		return e.st.SlotByName(n), n
+	}
+	sl := cfgInt(c, "slot", 1)
+	return sl, e.st.ModuleName(sl)
+}
+
 func (r *runner) runRoot(n *graphNode) {
 	switch n.Data.Type {
 	case "button_event":
@@ -260,8 +271,7 @@ func (r *runner) runRoot(n *graphNode) {
 			}
 		}
 	case "rs485_receive":
-		slot := cfgInt(n.Data.Config, "slot", 1)
-		sub := r.rxSub(slot)
+		sub := r.rxSub(n.Data.Config)
 		defer r.e.unsubscribe(sub)
 		for r.alive() {
 			select {
@@ -270,7 +280,7 @@ func (r *runner) runRoot(n *graphNode) {
 			case p := <-sub.ch:
 				ent := p.(RS485Entry)
 				raw, _ := hex.DecodeString(ent.Hex)
-				r.chain(n, &runCtx{frame: &frame{slot: slot, data: raw}})
+				r.chain(n, &runCtx{frame: &frame{slot: ent.Slot, data: raw}})
 			}
 		}
 	default:
@@ -278,10 +288,14 @@ func (r *runner) runRoot(n *graphNode) {
 	}
 }
 
-func (r *runner) rxSub(slot int) *subscription {
+func (r *runner) rxSub(c map[string]interface{}) *subscription {
 	return r.e.subscribe(func(typ string, p any) bool {
 		en, ok := p.(RS485Entry)
-		return typ == "rs485_data" && ok && en.Slot == slot && en.Dir == "rx"
+		if typ != "rs485_data" || !ok || en.Dir != "rx" {
+			return false
+		}
+		slot, _ := r.e.moduleSlot(c) // resolved on every frame: the module may be plugged in later
+		return slot == en.Slot
 	})
 }
 
@@ -342,17 +356,17 @@ func (r *runner) exec(n *graphNode, rc *runCtx, depth int) {
 		r.followAll(n, rc, "")
 
 	case "relay_set":
-		slot, ch := cfgInt(c, "slot", 1), cfgInt(c, "channel", 1)
+		slot, name := r.e.moduleSlot(c)
 		state := cfgStr(c, "state", "ON")
 		on := state == "ON"
 		if state == "TOGGLE" {
-			cur, _ := r.e.st.RelayOn(slot, ch)
+			cur, _ := r.e.st.RelayOn(slot, 1)
 			on = !cur
 		}
-		if typ, ok := r.e.st.SlotType(slot); !ok || typ != "relay" {
-			r.e.fail(fmt.Sprintf("модуль %d: реле не обнаружено", slot))
-		} else if err := r.e.dc.SetRelay(slot, ch, on); err != nil {
-			r.e.fail(fmt.Sprintf("реле %d.%d: %v", slot, ch, err))
+		if typ, ok := r.e.st.SlotType(slot); slot == 0 || !ok || typ != "relay" {
+			r.e.fail(fmt.Sprintf("реле %s не подключено", displayName(name, "Relay")))
+		} else if err := r.e.dc.SetRelay(slot, 1, on); err != nil {
+			r.e.fail(fmt.Sprintf("%s: %v", name, err))
 		}
 		r.followAll(n, rc, "")
 
@@ -373,18 +387,19 @@ func (r *runner) exec(n *graphNode, rc *runCtx, depth int) {
 		r.e.unsubscribe(sub)
 
 	case "rs485_receive": // in the middle of a chain: wait for the next frame (10 s)
-		slot := cfgInt(c, "slot", 1)
-		sub := r.rxSub(slot)
+		_, name := r.e.moduleSlot(c)
+		sub := r.rxSub(c)
 		select {
 		case <-r.ctx.Done():
 		case p := <-sub.ch:
-			raw, _ := hex.DecodeString(p.(RS485Entry).Hex)
-			rc.frame = &frame{slot: slot, data: raw}
+			ent := p.(RS485Entry)
+			raw, _ := hex.DecodeString(ent.Hex)
+			rc.frame = &frame{slot: ent.Slot, data: raw}
 			r.e.unsubscribe(sub)
 			r.followAll(n, rc, "")
 			return
 		case <-time.After(10 * time.Second):
-			r.e.fail(fmt.Sprintf("RS-485 модуль %d: данные не получены за 10 с", slot))
+			r.e.fail(fmt.Sprintf("%s: данные не получены за 10 с", displayName(name, "RS485")))
 		}
 		r.e.unsubscribe(sub)
 
@@ -397,14 +412,14 @@ func (r *runner) exec(n *graphNode, rc *runCtx, depth int) {
 		r.followAll(n, rc, "")
 
 	case "rs485_send":
-		slot := cfgInt(c, "slot", 1)
+		slot, name := r.e.moduleSlot(c)
 		data, err := r.e.payload(c)
 		if err != nil {
 			r.e.fail("RS-485 отправка: " + err.Error())
-		} else if typ, ok := r.e.st.SlotType(slot); !ok || typ != "rs485" {
-			r.e.fail(fmt.Sprintf("модуль %d: RS-485 не обнаружен", slot))
+		} else if typ, ok := r.e.st.SlotType(slot); slot == 0 || !ok || typ != "rs485" {
+			r.e.fail(fmt.Sprintf("%s не подключён", displayName(name, "RS485")))
 		} else if err := r.e.dc.RS485Send(slot, data); err != nil {
-			r.e.fail(fmt.Sprintf("RS-485 модуль %d: %v", slot, err))
+			r.e.fail(fmt.Sprintf("%s: %v", name, err))
 		}
 		r.followAll(n, rc, "")
 
@@ -457,6 +472,13 @@ func (r *runner) exec(n *graphNode, rc *runCtx, depth int) {
 	}
 }
 
+func displayName(name, def string) string {
+	if name == "" {
+		return def
+	}
+	return name
+}
+
 // ---- variables / conditions ---------------------------------------------------------
 
 func (e *Engine) variable(name string) (float64, error) {
@@ -482,9 +504,8 @@ func (e *Engine) variable(name string) (float64, error) {
 			}
 		}
 	case strings.HasPrefix(up, "RELAY-"):
-		var slot, ch int
-		if _, err := fmt.Sscanf(up[6:], "%d.%d", &slot, &ch); err == nil {
-			if v, ok := e.st.RelayOn(slot, ch); ok {
+		if slot := e.st.SlotByName(up); slot > 0 {
+			if v, ok := e.st.RelayOn(slot, 1); ok {
 				return b2f(v), nil
 			}
 		}
@@ -533,6 +554,10 @@ func (e *Engine) parse(f *frame, c map[string]interface{}) error {
 	if len(rows) == 0 {
 		return errors.New("таблица регистров пуста")
 	}
+	mod := strings.ToUpper(e.st.ModuleName(f.slot))
+	if mod == "" {
+		mod = fmt.Sprintf("RS485-%d", f.slot)
+	}
 	for i, r := range rows {
 		m, _ := r.(map[string]interface{})
 		off := cfgInt(m, "byteIndex", 0)
@@ -565,9 +590,9 @@ func (e *Engine) parse(f *frame, c map[string]interface{}) error {
 			v = float64(math.Float32frombits(binary.BigEndian.Uint32(b)))
 		}
 		e.mu.Lock()
-		e.vars[fmt.Sprintf("RS485-%d.%d", f.slot, i+1)] = v
+		e.vars[fmt.Sprintf("%s.%d", mod, i+1)] = v
 		if name != "" {
-			e.vars[fmt.Sprintf("RS485-%d.%s", f.slot, name)] = v
+			e.vars[fmt.Sprintf("%s.%s", mod, name)] = v
 		}
 		e.mu.Unlock()
 	}

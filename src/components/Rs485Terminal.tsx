@@ -4,6 +4,7 @@ import type { RS485Entry, RS485SendRequest } from '../api/types';
 
 interface Props {
   slot: number;
+  name?: string;
   onClose: () => void;
   onSettings: () => void;
 }
@@ -19,7 +20,7 @@ function fmtHex(hex: string) {
 }
 
 /** Small terminal window: everything the module receives (←) and transmits (→). */
-export default function Rs485Terminal({ slot, onClose, onSettings }: Props) {
+export default function Rs485Terminal({ slot, name, onClose, onSettings }: Props) {
   const [lines, setLines] = useState<RS485Entry[]>([]);
   const [mode, setMode] = useState<RS485SendRequest['mode']>('text');
   const [eol, setEol] = useState<RS485SendRequest['eol']>('crlf');
@@ -55,18 +56,18 @@ export default function Rs485Terminal({ slot, onClose, onSettings }: Props) {
   }
 
   return (
-    <div className="card" style={styles.win} role="dialog" aria-label={`Терминал RS-485, модуль ${slot}`} onClick={(e) => e.stopPropagation()}>
+    <div className="card" style={styles.win} role="dialog" aria-label={`Терминал ${name ?? 'RS-485'}`} onClick={(e) => e.stopPropagation()}>
       <div style={styles.head}>
-        <strong style={{ fontSize: 13 }}>Терминал RS-485 · модуль {slot}</strong>
+        <strong style={{ fontSize: 13 }}>Терминал · {name ?? `модуль ${slot}`}</strong>
         <span style={{ flex: 1 }} />
-        <select value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label="Вид данных" style={{ fontSize: 11 }}>
+        <select value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label="Вид данных" style={styles.fld}>
           <option value="both">HEX + текст</option>
           <option value="hex">HEX</option>
           <option value="text">Текст</option>
         </select>
-        <button className="btn" style={styles.small} onClick={() => setLines([])}>Очистить</button>
-        <button className="btn" style={styles.small} onClick={onSettings}>Параметры порта</button>
-        <button className="btn" style={styles.small} onClick={onClose} aria-label="Закрыть">✕</button>
+        <button className="btn" style={styles.ctl} onClick={() => setLines([])}>Очистить</button>
+        <button className="btn" style={styles.ctl} onClick={onSettings}>Параметры порта</button>
+        <button className="btn" style={{ ...styles.ctl, width: 32, padding: 0 }} onClick={onClose} aria-label="Закрыть">✕</button>
       </div>
 
       <div ref={boxRef} style={styles.log}>
@@ -85,25 +86,25 @@ export default function Rs485Terminal({ slot, onClose, onSettings }: Props) {
       </div>
 
       <form onSubmit={send} style={styles.form}>
-        <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} aria-label="Формат" style={{ fontSize: 12 }}>
+        <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} aria-label="Формат" style={styles.fld}>
           <option value="text">Текст</option>
           <option value="hex">HEX</option>
         </select>
         <input
-          style={{ flex: 1, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+          style={{ ...styles.fld, flex: 1, minWidth: 0, fontFamily: 'ui-monospace, monospace' }}
           value={text}
           placeholder={mode === 'hex' ? '01 03 00 00 00 02 C4 0B' : 'Данные для отправки'}
           onChange={(e) => setText(e.target.value)}
         />
         {mode === 'text' && (
-          <select value={eol} onChange={(e) => setEol(e.target.value as typeof eol)} aria-label="Окончание строки" style={{ fontSize: 12 }}>
+          <select value={eol} onChange={(e) => setEol(e.target.value as typeof eol)} aria-label="Окончание строки" style={styles.fld}>
             <option value="none">без окончания</option>
             <option value="cr">CR</option>
             <option value="lf">LF</option>
             <option value="crlf">CR+LF</option>
           </select>
         )}
-        <button className="btn primary" type="submit" style={styles.small}>Отправить</button>
+        <button className="btn primary" type="submit" style={styles.ctl}>Отправить</button>
       </form>
       {error && <div style={{ color: 'var(--danger)', fontSize: 12, padding: '0 12px 8px' }}>{error}</div>}
     </div>
@@ -115,5 +116,7 @@ const styles: Record<string, React.CSSProperties> = {
   head: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)' },
   log: { height: 240, overflow: 'auto', padding: '8px 12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, lineHeight: 1.55, background: '#030f2b' },
   form: { display: 'flex', gap: 8, padding: 10, borderTop: '1px solid var(--border)' },
-  small: { padding: '4px 10px', fontSize: 12 }
+  fld: { height: 28, boxSizing: 'border-box', padding: '0 8px', fontSize: 12 },
+  // every control in the header and the send row has the same height (28px)
+  ctl: { height: 28, boxSizing: 'border-box', padding: '0 10px', fontSize: 12, lineHeight: '26px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', whiteSpace: 'nowrap' }
 };

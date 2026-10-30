@@ -81,6 +81,10 @@ a { color: var(--accent); }
 .seg:focus-visible, svg rect:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---- device picture: LED and button animation (classes are set by DeviceDiagram) ---- */
+/* ports and modules: the coloured fill is hidden until the card gets the `connected` class */
+.dev-diagram .port-fill { fill-opacity: 0; transition: fill-opacity 0.4s ease, fill 0.3s ease; }
+.dev-diagram .port-card.connected .port-fill { fill-opacity: 1; }
+
 .led-dot { fill: #f7f7f7; transition: fill 0.28s ease, filter 0.28s ease; }
 .led-dot.on { fill: #0015ff; filter: drop-shadow(0 0 4px rgba(40, 70, 255, 0.95)); }
 
@@ -100,5 +104,5 @@ a { color: var(--accent); }
 .btn-hw.pressed .btn-cap { fill: #9b9292; }
 
 @media (prefers-reduced-motion: reduce) {
-  .led-dot, .led-rays, .led-rays .rays-inner, .btn-hw .btn-plunger-g, .btn-hw .btn-cap { transition: none; }
+  .led-dot, .led-rays, .led-rays .rays-inner, .btn-hw .btn-plunger-g, .btn-hw .btn-cap, .dev-diagram .port-fill { transition: none; }
 }

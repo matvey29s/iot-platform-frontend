@@ -22,6 +22,8 @@ export type PortKind = 'fixed' | 'link' | 'module';
  */
 export interface PortState {
   id: string;
+  /** Modules only: RS485-0, RS485-1, Relay-0 ... (numbered per type in slot order). */
+  name?: string;
   kind: PortKind;
   connected: boolean;
   slot?: number;
@@ -30,7 +32,7 @@ export interface PortState {
   adcPercent?: number;
   adcRaw?: number;
   adcOk?: boolean;
-  /** Relay modules only: state of channels 1..4. */
+  /** Relay modules only: state of the single relay channel. */
   relays?: boolean[];
 }
 
@@ -46,7 +48,7 @@ export interface Rs485Config {
 }
 
 export interface RelayConfig {
-  channels: number;
+  channels: number; // always 1
   safeState: 'keep' | 'all_off' | 'all_on';
 }
 
@@ -119,6 +121,31 @@ export interface RS485SendRequest {
   eol: 'none' | 'cr' | 'lf' | 'crlf';
 }
 
+/** Ethernet interface data reported by the daemon (right-click on "ethernet1"). */
+export interface EthInfo {
+  iface: string;
+  exists: boolean;
+  up: boolean;
+  operstate: string;
+  speed: number; // Mbit/s, -1 = unknown
+  duplex: string;
+  mac: string;
+  ip: string;
+  mask: string;
+  mtu: number;
+  rxBytes: number;
+  txBytes: number;
+  rxPackets: number;
+  txPackets: number;
+  rxErrors: number;
+  txErrors: number;
+  rxDropped: number;
+  txDropped: number;
+  rxRate: number; // bytes/s
+  txRate: number;
+  ts: number;
+}
+
 // ---- Monitoring tab -----------------------------------------------------------
 
 export interface SystemInfo {
@@ -152,4 +179,5 @@ export type LiveEvent =
   | { type: 'port_adc'; payload: { id: string; adcPercent: number; adcRaw: number } }
   | { type: 'io_led'; payload: LedState }
   | { type: 'io_button'; payload: ButtonState }
-  | { type: 'rs485_data'; payload: RS485Entry };
+  | { type: 'rs485_data'; payload: RS485Entry }
+  | { type: 'ethernet'; payload: EthInfo };

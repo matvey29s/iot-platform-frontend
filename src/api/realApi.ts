@@ -1,5 +1,6 @@
 import type {
   AuthResult,
+  EthInfo,
   IOState,
   RS485Entry,
   RS485SendRequest,
@@ -70,6 +71,19 @@ export async function saveRegisterTable(deviceId: string, rows: RegisterTableRow
 
 export function fetchIO(): Promise<IOState> {
   return http<IOState>('GET', 'io');
+}
+
+export function fetchEthernet(): Promise<EthInfo> {
+  return http<EthInfo>('GET', 'ethernet');
+}
+
+/** The relay module has one channel. */
+export async function setRelay(portId: string, on: boolean): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('POST', `modules/${encodeURIComponent(portId)}/relay`, { on });
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
 }
 
 export function fetchRs485Log(slot: number): Promise<RS485Entry[]> {

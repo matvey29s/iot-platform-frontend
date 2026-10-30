@@ -25,6 +25,11 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <limits.h>
 #include <linux/gpio.h>
 #include <poll.h>
 #include <signal.h>
@@ -33,6 +38,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/sysmacros.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -47,7 +54,7 @@
 #define NSLOTS 2
 #define NBTN 3
 #define NLED 3
-#define NRELAY 4
+#define NRELAY 1 /* a relay module has ONE channel, driven by the UART TX pad switched to GPIO */
 #define MAXCLI 8
 #define LINEMAX 4096
 #define OUTMAX 2048
@@ -62,7 +69,12 @@ typedef struct {
     char hook[256];
     char sock[256];
     char disk_path[128];
+    char eth_if[32];       /* interface shown as "ethernet1" */
     char gpio_root[128];   /* sysfs fallback, overridable for tests */
+    char mem_dev[128];     /* /dev/mem, overridable for tests */
+    int force_kind[NSLOTS]; /* -1 = measure, else K_* : testing without ADC */
+    int adc_mode;          /* 0 auto (IIO if present, else direct), 1 IIO only, 2 direct only */
+    int adc_ain[NSLOTS];   /* AM335x analog input AINx used for slot 1 / 2 */
     int adc_max;
     int period;
     int confirm;
@@ -78,6 +90,7 @@ typedef struct {
     int num;
     int fd;      /* line-handle fd (chardev) or value fd (sysfs) */
     int sysfs;
+    int v2;      /* uAPI v2 line request */
     int open_;
 } gpio_t;
 
@@ -86,6 +99,7 @@ typedef struct {
     int pending;
     int pending_n;
     int adc_ok;
+    long long adc_err_log;
     long raw;
     double pct;
     /* RS-485 */
@@ -161,6 +175,11 @@ static void cfg_defaults(void) {
     snprintf(cfg.sock, sizeof cfg.sock, "/var/run/nexus/daemon.sock");
     snprintf(cfg.disk_path, sizeof cfg.disk_path, "/");
     snprintf(cfg.gpio_root, sizeof cfg.gpio_root, "/sys/class/gpio");
+    snprintf(cfg.eth_if, sizeof cfg.eth_if, "eth0");
+    snprintf(cfg.mem_dev, sizeof cfg.mem_dev, "/dev/mem");
+    cfg.force_kind[0] = cfg.force_kind[1] = -1;
+    cfg.adc_ain[0] = 0;
+    cfg.adc_ain[1] = 1;
     cfg.adc_max = 4095;
     cfg.period = 3;
     cfg.confirm = 2;
@@ -170,11 +189,10 @@ static void cfg_defaults(void) {
     int b[NBTN] = {66, 69, 45}, l[NLED] = {49, 112, 20};
     memcpy(cfg.btn_gpio, b, sizeof b);
     memcpy(cfg.led_gpio, l, sizeof l);
-    cfg.btn_active_low = 1;
+    cfg.btn_active_low = 0; /* pulled to ground, high level = pressed */
     cfg.led_active_low = 0;
-    int r1[NRELAY] = {115, 117, 15, 14}, r2[NRELAY] = {48, 60, 31, 30};
-    memcpy(cfg.relay_gpio[0], r1, sizeof r1);
-    memcpy(cfg.relay_gpio[1], r2, sizeof r2);
+    cfg.relay_gpio[0][0] = 15; /* GPIO0_15 = UART1_TXD pad */
+    cfg.relay_gpio[1][0] = 31; /* GPIO0_31 = UART4_TXD pad */
     cfg.relay_active_low = 0;
     cfg.de_gpio[0] = 115; cfg.re_gpio[0] = 117;
     cfg.de_gpio[1] = 48;  cfg.re_gpio[1] = 60;
@@ -205,6 +223,12 @@ static void cfg_load(const char *path) {
         if (hash) { *hash = 0; v = trim(v); }
         if (!strcmp(k, "adc0")) snprintf(cfg.adc_path[0], sizeof cfg.adc_path[0], "%s", v);
         else if (!strcmp(k, "adc1")) snprintf(cfg.adc_path[1], sizeof cfg.adc_path[1], "%s", v);
+        else if (!strcmp(k, "adc_mode")) cfg.adc_mode = !strcmp(v, "iio") ? 1 : !strcmp(v, "direct") ? 2 : 0;
+        else if (!strncmp(k, "slot", 4) && (k[4] == '1' || k[4] == '2') && !strcmp(k + 5, "_force"))
+            cfg.force_kind[k[4] - '1'] = !strcmp(v, "rs485") ? K_RS485 : !strcmp(v, "relay") ? K_RELAY : !strcmp(v, "none") ? K_NONE : -1;
+        else if (!strcmp(k, "adc_ain0")) cfg.adc_ain[0] = atoi(v) & 7;
+        else if (!strcmp(k, "adc_ain1")) cfg.adc_ain[1] = atoi(v) & 7;
+        else if (!strcmp(k, "mem_dev")) snprintf(cfg.mem_dev, sizeof cfg.mem_dev, "%s", v);
         else if (!strcmp(k, "uart_dev1")) snprintf(cfg.uart_dev[0], sizeof cfg.uart_dev[0], "%s", v);
         else if (!strcmp(k, "uart_dev2")) snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "%s", v);
         else if (!strcmp(k, "hook")) snprintf(cfg.hook, sizeof cfg.hook, "%s", v);
@@ -221,8 +245,9 @@ static void cfg_load(const char *path) {
         else if (!strcmp(k, "btn_active_low")) cfg.btn_active_low = atoi(v);
         else if (!strcmp(k, "led_gpio")) parse_int_list(v, cfg.led_gpio, NLED);
         else if (!strcmp(k, "led_active_low")) cfg.led_active_low = atoi(v);
-        else if (!strcmp(k, "relay1_gpios")) parse_int_list(v, cfg.relay_gpio[0], NRELAY);
-        else if (!strcmp(k, "relay2_gpios")) parse_int_list(v, cfg.relay_gpio[1], NRELAY);
+        else if (!strcmp(k, "relay1_gpio")) cfg.relay_gpio[0][0] = atoi(v);
+        else if (!strcmp(k, "relay2_gpio")) cfg.relay_gpio[1][0] = atoi(v);
+        else if (!strcmp(k, "eth1")) snprintf(cfg.eth_if, sizeof cfg.eth_if, "%s", v);
         else if (!strcmp(k, "relay_active_low")) cfg.relay_active_low = atoi(v);
         else if (!strcmp(k, "rs485_de1")) cfg.de_gpio[0] = atoi(v);
         else if (!strcmp(k, "rs485_re1")) cfg.re_gpio[0] = atoi(v);
@@ -246,6 +271,41 @@ static int write_file(const char *path, const char *val) {
     return r < 0 ? -1 : 0;
 }
 
+/* AM335x GPIO bank n (num/32) lives at a fixed address. The kernel numbers
+ * /dev/gpiochipN in probe order, which is NOT the bank order, so find the chip
+ * by the address of its platform device. */
+static const char *const bank_addr[4] = {"44e07000", "4804c000", "481ac000", "481ae000"};
+
+/* returns chardev index (or -1); *sysfs_base = first sysfs number of the chip (or -1) */
+static int find_chip(int bank, int *sysfs_base) {
+    int chip = -1;
+    *sysfs_base = -1;
+    if (bank < 0 || bank > 3) return -1;
+    for (int n = 0; n < 16 && chip < 0; n++) {
+        char p[96], real[PATH_MAX];
+        snprintf(p, sizeof p, "/sys/bus/gpio/devices/gpiochip%d", n);
+        if (realpath(p, real) && strstr(real, bank_addr[bank])) chip = n;
+    }
+    DIR *d = opendir("/sys/class/gpio");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "gpiochip", 8)) continue;
+            char p[160], real[PATH_MAX], b[32];
+            snprintf(p, sizeof p, "/sys/class/gpio/%s", e->d_name);
+            if (!realpath(p, real) || !strstr(real, bank_addr[bank])) {
+                snprintf(p, sizeof p, "/sys/class/gpio/%s/device", e->d_name);
+                if (!realpath(p, real) || !strstr(real, bank_addr[bank])) continue;
+            }
+            *sysfs_base = atoi(e->d_name + 8);
+            (void)b;
+            break;
+        }
+        closedir(d);
+    }
+    return chip;
+}
+
 /* dir_out: 1 = output, 0 = input; init = initial PHYSICAL level for outputs */
 static int gpio_open(gpio_t *g, int num, int dir_out, int init) {
     memset(g, 0, sizeof *g);
@@ -253,36 +313,72 @@ static int gpio_open(gpio_t *g, int num, int dir_out, int init) {
     g->fd = -1;
     if (num < 0) return -1;
 
+    int bank = num / 32, line = num % 32, sbase = -1;
+    int idx = find_chip(bank, &sbase);
+    if (idx < 0) idx = bank; /* fall back to "chip N = bank N" */
+
     char path[160];
-    snprintf(path, sizeof path, "/dev/gpiochip%d", num / 32);
+    snprintf(path, sizeof path, "/dev/gpiochip%d", idx);
     int chip = open(path, O_RDWR | O_CLOEXEC);
     if (chip >= 0) {
+        /* uAPI v2 (the only one in newer kernels) */
+        struct gpio_v2_line_request rq2;
+        memset(&rq2, 0, sizeof rq2);
+        rq2.offsets[0] = (unsigned)line;
+        rq2.num_lines = 1;
+        snprintf(rq2.consumer, sizeof rq2.consumer, "nexusd");
+        rq2.config.flags = dir_out ? GPIO_V2_LINE_FLAG_OUTPUT : GPIO_V2_LINE_FLAG_INPUT;
+        if (dir_out) {
+            rq2.config.num_attrs = 1;
+            rq2.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+            rq2.config.attrs[0].attr.values = init ? 1 : 0;
+            rq2.config.attrs[0].mask = 1;
+        }
+        int r = ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &rq2);
+        int e2 = errno;
+        if (r == 0) {
+            close(chip);
+            g->fd = rq2.fd;
+            g->v2 = 1;
+            g->open_ = 1;
+            return 0;
+        }
+        /* uAPI v1 */
         struct gpiohandle_request rq;
         memset(&rq, 0, sizeof rq);
-        rq.lineoffsets[0] = (unsigned)(num % 32);
+        rq.lineoffsets[0] = (unsigned)line;
         rq.flags = dir_out ? GPIOHANDLE_REQUEST_OUTPUT : GPIOHANDLE_REQUEST_INPUT;
         rq.default_values[0] = (unsigned char)(init ? 1 : 0);
         rq.lines = 1;
         snprintf(rq.consumer_label, sizeof rq.consumer_label, "nexusd");
-        int r = ioctl(chip, GPIO_GET_LINEHANDLE_IOCTL, &rq);
+        r = ioctl(chip, GPIO_GET_LINEHANDLE_IOCTL, &rq);
+        int e1 = errno;
         close(chip);
         if (r == 0) {
             g->fd = rq.fd;
             g->open_ = 1;
             return 0;
         }
+        logf_("gpio %d: %s line %d: v2 ioctl: %s, v1 ioctl: %s", num, path, line, strerror(e2), strerror(e1));
+    } else {
+        logf_("gpio %d: open %s: %s", num, path, strerror(errno));
     }
-    /* sysfs fallback */
+    /* sysfs fallback: number = base of the chip + line */
+    int snum = sbase >= 0 ? sbase + line : num;
     char tmp[160], numbuf[16];
-    snprintf(numbuf, sizeof numbuf, "%d", num);
+    snprintf(numbuf, sizeof numbuf, "%d", snum);
     snprintf(tmp, sizeof tmp, "%s/export", cfg.gpio_root);
     write_file(tmp, numbuf); /* may already be exported */
-    snprintf(tmp, sizeof tmp, "%s/gpio%d/direction", cfg.gpio_root, num);
-    if (write_file(tmp, dir_out ? (init ? "high" : "low") : "in") != 0) return -1;
-    snprintf(tmp, sizeof tmp, "%s/gpio%d/value", cfg.gpio_root, num);
+    snprintf(tmp, sizeof tmp, "%s/gpio%d/direction", cfg.gpio_root, snum);
+    if (write_file(tmp, dir_out ? (init ? "high" : "low") : "in") != 0) {
+        logf_("gpio %d: sysfs %s: %s (is the line owned by a kernel driver? see /sys/kernel/debug/gpio)", num, tmp, strerror(errno));
+        return -1;
+    }
+    snprintf(tmp, sizeof tmp, "%s/gpio%d/value", cfg.gpio_root, snum);
     g->fd = open(tmp, dir_out ? O_RDWR : O_RDONLY);
-    if (g->fd < 0) return -1;
+    if (g->fd < 0) { logf_("gpio %d: open %s: %s", num, tmp, strerror(errno)); return -1; }
     g->sysfs = 1;
+    g->num = snum; /* gpio_close unexports/uses this number */
     g->open_ = 1;
     return 0;
 }
@@ -301,6 +397,13 @@ static void gpio_close(gpio_t *g) {
 
 static int gpio_get(gpio_t *g) {
     if (!g->open_) return -1;
+    if (g->v2) {
+        struct gpio_v2_line_values lv;
+        memset(&lv, 0, sizeof lv);
+        lv.mask = 1;
+        if (ioctl(g->fd, GPIO_V2_LINE_GET_VALUES_IOCTL, &lv) < 0) return -1;
+        return (lv.bits & 1) ? 1 : 0;
+    }
     if (!g->sysfs) {
         struct gpiohandle_data d;
         memset(&d, 0, sizeof d);
@@ -314,6 +417,13 @@ static int gpio_get(gpio_t *g) {
 
 static int gpio_set(gpio_t *g, int v) {
     if (!g->open_) return -1;
+    if (g->v2) {
+        struct gpio_v2_line_values lv;
+        memset(&lv, 0, sizeof lv);
+        lv.mask = 1;
+        lv.bits = v ? 1 : 0;
+        return ioctl(g->fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &lv) < 0 ? -1 : 0;
+    }
     if (!g->sysfs) {
         struct gpiohandle_data d;
         memset(&d, 0, sizeof d);
@@ -325,7 +435,7 @@ static int gpio_set(gpio_t *g, int v) {
 
 /* ---------------------------------------------------------------- ADC */
 
-static int read_adc(const char *path, long *out) {
+static int read_adc_file(const char *path, long *out) {
     FILE *f = fopen(path, "r");
     if (!f) return -1;
     char b[64];
@@ -337,6 +447,102 @@ static int read_adc(const char *path, long *out) {
     if (end == b) return -1;
     *out = v;
     return 0;
+}
+
+/* Read the configured file; if it is not readable look for in_voltage<ch>_raw in
+ * every IIO device (the iio:deviceN number depends on the kernel). */
+static int read_adc(int ch, char *path, size_t pn, long *out) {
+    if (read_adc_file(path, out) == 0) return 0;
+    int saved = errno;
+    for (int d = 0; d < 8; d++) {
+        char cand[256];
+        snprintf(cand, sizeof cand, "/sys/bus/iio/devices/iio:device%d/in_voltage%d_raw", d, ch);
+        if (read_adc_file(cand, out) == 0) {
+            logf_("ADC channel %d found at %s", ch, cand);
+            snprintf(path, pn, "%s", cand);
+            return 0;
+        }
+    }
+    errno = saved;
+    return -1;
+}
+
+
+/* ---- direct ADC access (AM335x TSC_ADC_SS) for kernels without the IIO driver ----
+ * Registers are reached through /dev/mem; the module clock is enabled here.
+ * One-shot software step 1, 16x averaging, result from FIFO0. */
+#define CM_WKUP_ADC_CLKCTRL 0x44E004BCu
+#define ADC_BASE            0x44E0D000u
+#define A_CTRL        0x40
+#define A_CLKDIV      0x4C
+#define A_STEPEN      0x54
+#define A_IDLECFG     0x58
+#define A_STEPCFG1    0x64
+#define A_STEPDLY1    0x68
+#define A_FIFO0CNT    0xE4
+#define A_FIFO0DATA   0x100
+
+static volatile unsigned *adc_regs, *cm_regs;
+static int direct_state; /* 0 untried, 1 ready, -1 failed */
+
+static unsigned rd(volatile unsigned *b, unsigned off) { return b[off / 4]; }
+static void wr(volatile unsigned *b, unsigned off, unsigned v) { b[off / 4] = v; }
+
+static int direct_init(void) {
+    int fd = open(cfg.mem_dev, O_RDWR | O_SYNC | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT && !strcmp(cfg.mem_dev, "/dev/mem")) {
+        mknod("/dev/mem", S_IFCHR | 0600, makedev(1, 1)); /* node missing, driver may still exist */
+        fd = open(cfg.mem_dev, O_RDWR | O_SYNC | O_CLOEXEC);
+    }
+    if (fd < 0) { logf_("ADC direct: open %s: %s (kernel built without CONFIG_DEVMEM?)", cfg.mem_dev, strerror(errno)); return -1; }
+    void *a = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, ADC_BASE);
+    void *c = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, CM_WKUP_ADC_CLKCTRL & ~0xFFFu);
+    int e = errno;
+    close(fd);
+    if (a == MAP_FAILED || c == MAP_FAILED) { logf_("ADC direct: mmap: %s (CONFIG_STRICT_DEVMEM?)", strerror(e)); errno = e; return -1; }
+    adc_regs = a;
+    cm_regs = c;
+    unsigned co = CM_WKUP_ADC_CLKCTRL & 0xFFF;
+    if ((rd(cm_regs, co) & 3) != 2) {
+        wr(cm_regs, co, 2);
+        for (int i = 0; i < 100 && (rd(cm_regs, co) >> 16 & 3) != 0; i++) usleep(1000);
+    }
+    wr(adc_regs, A_CTRL, 0x4);          /* step config writable, ADC off while configuring */
+    wr(adc_regs, A_CLKDIV, 7);          /* 24 MHz / 8 = 3 MHz */
+    wr(adc_regs, A_IDLECFG, (8u << 15) | (8u << 19));
+    wr(adc_regs, A_STEPEN, 0);
+    wr(adc_regs, A_CTRL, 0x5);          /* + enable */
+    logf_("ADC: IIO driver not present, reading the AM335x ADC directly through %s", cfg.mem_dev);
+    return 0;
+}
+
+static int direct_read(int ain, long *out) {
+    if (direct_state == 0) direct_state = direct_init() == 0 ? 1 : -1;
+    if (direct_state < 0) { errno = errno ? errno : EIO; return -1; }
+    for (int i = 0; i < 70 && (rd(adc_regs, A_FIFO0CNT) & 0x7F); i++) (void)rd(adc_regs, A_FIFO0DATA);
+    wr(adc_regs, A_STEPCFG1, (0u << 0) | (4u << 2) | (3u << 12) | (8u << 15) | ((unsigned)(ain & 7) << 19) | (3u << 23));
+    wr(adc_regs, A_STEPDLY1, 0x98);
+    wr(adc_regs, A_STEPEN, 0x2);        /* step 1 */
+    for (int i = 0; i < 100; i++) {
+        if (rd(adc_regs, A_FIFO0CNT) & 0x7F) {
+            *out = (long)(rd(adc_regs, A_FIFO0DATA) & 0xFFF);
+            return 0;
+        }
+        usleep(500);
+    }
+    errno = ETIMEDOUT;
+    return -1;
+}
+
+static int adc_sample(int slot, long *out) {
+    if (cfg.force_kind[slot] >= 0) { /* testing: pretend the ADC measured this module */
+        double pct = cfg.force_kind[slot] == K_RS485 ? cfg.rs485_pct : cfg.force_kind[slot] == K_RELAY ? cfg.relay_pct : 0.0;
+        *out = (long)(pct / 100.0 * cfg.adc_max + 0.5);
+        return 0;
+    }
+    if (cfg.adc_mode != 2 && read_adc(slot, cfg.adc_path[slot], sizeof cfg.adc_path[slot], out) == 0) return 0;
+    if (cfg.adc_mode == 1 || access("/sys/bus/iio/devices", F_OK) == 0) return -1; /* IIO exists: do not fight the driver */
+    return direct_read(cfg.adc_ain[slot], out);
 }
 
 static int classify(double pct) {
@@ -419,8 +625,8 @@ static void fmt_led(char *out, size_t n, int i) {
 }
 static void fmt_relay(char *out, size_t n, int slot) {
     slot_t *s = &slots[slot];
-    snprintf(out, n, "{\"type\":\"relay\",\"slot\":%d,\"states\":[%d,%d,%d,%d],\"ts\":%lld}\n", slot + 1,
-             s->relay_on[0], s->relay_on[1], s->relay_on[2], s->relay_on[3], now_ms());
+    snprintf(out, n, "{\"type\":\"relay\",\"slot\":%d,\"states\":[%d],\"ts\":%lld}\n", slot + 1,
+             s->relay_on[0], now_ms());
 }
 
 static void hex_encode(char *dst, const unsigned char *src, size_t n) {
@@ -611,8 +817,11 @@ static void scan_slots(int force_report) {
     for (int i = 0; i < NSLOTS; i++) {
         slot_t *s = &slots[i];
         long raw;
-        if (read_adc(cfg.adc_path[i], &raw) != 0) {
-            if (s->adc_ok) logf_("cannot read ADC %s: %s", cfg.adc_path[i], strerror(errno));
+        if (adc_sample(i, &raw) != 0) {
+            if (s->adc_ok || now_ms() - s->adc_err_log > 60000) {
+                logf_("cannot read ADC %s: %s", cfg.adc_path[i], strerror(errno));
+                s->adc_err_log = now_ms();
+            }
             s->adc_ok = 0;
             if (force_report) { fmt_module(msg, sizeof msg, i); broadcast(msg); }
             continue; /* keep last known state, do not touch pins */
@@ -639,6 +848,68 @@ static void scan_slots(int force_report) {
     }
 }
 
+
+/* ---------------------------------------------------------------- ethernet */
+
+static void sys_read(const char *iface, const char *file, char *out, size_t n) {
+    char p[160];
+    snprintf(p, sizeof p, "/sys/class/net/%s/%s", iface, file);
+    out[0] = 0;
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    if (fgets(out, (int)n, f)) { size_t l = strlen(out); while (l && (out[l-1] == '\n' || out[l-1] == '\r' || out[l-1] == ' ')) out[--l] = 0; }
+    fclose(f);
+}
+static long long sys_num(const char *iface, const char *file, long long def) {
+    char b[64];
+    sys_read(iface, file, b, sizeof b);
+    if (!b[0]) return def;
+    char *e;
+    long long v = strtoll(b, &e, 10);
+    return e == b ? def : v;
+}
+
+static char last_eth[OUTMAX];
+
+static void fmt_eth(char *out, size_t n) {
+    static long long prev_rx = -1, prev_tx = -1, prev_ts;
+    const char *ifc = cfg.eth_if;
+    char oper[32], duplex[32], mac[32], ip[64] = "", mask[64] = "";
+    sys_read(ifc, "operstate", oper, sizeof oper);
+    sys_read(ifc, "duplex", duplex, sizeof duplex);
+    sys_read(ifc, "address", mac, sizeof mac);
+    int exists = oper[0] != 0;
+    int carrier = sys_num(ifc, "carrier", 0) == 1;
+    long long speed = sys_num(ifc, "speed", -1);
+    long long rx = sys_num(ifc, "statistics/rx_bytes", 0), tx = sys_num(ifc, "statistics/tx_bytes", 0);
+    long long ts = now_ms(), rxr = 0, txr = 0;
+    if (prev_rx >= 0 && ts > prev_ts && rx >= prev_rx && tx >= prev_tx) {
+        rxr = (rx - prev_rx) * 1000 / (ts - prev_ts);
+        txr = (tx - prev_tx) * 1000 / (ts - prev_ts);
+    }
+    prev_rx = rx; prev_tx = tx; prev_ts = ts;
+    struct ifaddrs *ifa, *p;
+    if (getifaddrs(&ifa) == 0) {
+        for (p = ifa; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || strcmp(p->ifa_name, ifc)) continue;
+            inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, ip, sizeof ip);
+            if (p->ifa_netmask) inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_netmask)->sin_addr, mask, sizeof mask);
+            break;
+        }
+        freeifaddrs(ifa);
+    }
+    snprintf(out, n,
+             "{\"type\":\"eth\",\"iface\":\"%s\",\"exists\":%s,\"up\":%s,\"operstate\":\"%s\",\"speed\":%lld,\"duplex\":\"%s\","
+             "\"mac\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"mtu\":%lld,"
+             "\"rxBytes\":%lld,\"txBytes\":%lld,\"rxPackets\":%lld,\"txPackets\":%lld,"
+             "\"rxErrors\":%lld,\"txErrors\":%lld,\"rxDropped\":%lld,\"txDropped\":%lld,"
+             "\"rxRate\":%lld,\"txRate\":%lld,\"ts\":%lld}\n",
+             ifc, exists ? "true" : "false", carrier ? "true" : "false", oper, speed, duplex, mac, ip, mask,
+             sys_num(ifc, "mtu", 0), rx, tx, sys_num(ifc, "statistics/rx_packets", 0), sys_num(ifc, "statistics/tx_packets", 0),
+             sys_num(ifc, "statistics/rx_errors", 0), sys_num(ifc, "statistics/tx_errors", 0),
+             sys_num(ifc, "statistics/rx_dropped", 0), sys_num(ifc, "statistics/tx_dropped", 0), rxr, txr, ts);
+}
+
 /* ---------------------------------------------------------------- buttons / LEDs */
 
 static void io_setup(void) {
@@ -656,16 +927,15 @@ static void io_setup(void) {
     }
 }
 
-/* every ~10 ms; a level must be stable for 3 samples (30 ms) to count */
+/* every ~10 ms */
 static void scan_buttons(void) {
     char msg[OUTMAX];
     for (int i = 0; i < NBTN; i++) {
         int v = gpio_get(&btn[i]);
         if (v < 0) continue;
         int pressed = cfg.btn_active_low ? !v : v;
-        if (pressed == btn_raw_last[i]) { if (btn_raw_n[i] < 1000) btn_raw_n[i]++; }
-        else { btn_raw_last[i] = pressed; btn_raw_n[i] = 1; }
-        if (btn_raw_n[i] >= 3 && pressed != btn_state[i]) {
+        /* contact bounce is removed in hardware: every level change is an event */
+        if (pressed != btn_state[i]) {
             btn_state[i] = pressed;
             fmt_button(msg, sizeof msg, i);
             broadcast(msg);
@@ -874,6 +1144,7 @@ static void send_snapshot(cli_t *c) {
     for (int i = 0; i < NBTN; i++) { fmt_button(msg, sizeof msg, i); cli_send(c, msg); if (c->fd < 0) return; }
     for (int i = 0; i < NLED; i++) { fmt_led(msg, sizeof msg, i); cli_send(c, msg); if (c->fd < 0) return; }
     if (last_sys[0]) cli_send(c, last_sys);
+    if (last_eth[0]) cli_send(c, last_eth);
 }
 
 static void handle_line(cli_t *c, const char *line) {
@@ -967,6 +1238,8 @@ int main(int argc, char **argv) {
             scan_slots(0);
             fmt_system(last_sys, sizeof last_sys);
             broadcast(last_sys);
+            fmt_eth(last_eth, sizeof last_eth);
+            broadcast(last_eth);
             next_tick += (long long)cfg.period * 1000;
             if (next_tick < now) next_tick = now + (long long)cfg.period * 1000;
         }

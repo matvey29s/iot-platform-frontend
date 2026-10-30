@@ -1,20 +1,39 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { Edge, Node } from 'reactflow';
 import { NODE_DEFS } from './nodeDefs';
-import type { RegisterTableRow, ScenarioNodeData } from '../api/types';
+import type { PortState, RegisterTableRow, ScenarioNodeData } from '../api/types';
+import VariableInput from './VariableInput';
+import { buildVariables, modulesOfType } from './variables';
 
 interface Props {
   data: ScenarioNodeData;
+  /** live data for the drop-downs: connected modules and the whole graph */
+  ports: PortState[];
+  nodes: Node<ScenarioNodeData>[];
+  edges: Edge[];
   onSave: (config: Record<string, unknown>) => void;
   onClose: () => void;
 }
 
-export default function NodeConfigModal({ data, onSave, onClose }: Props) {
+export default function NodeConfigModal({ data, ports, nodes, edges, onSave, onClose }: Props) {
   const def = NODE_DEFS[data.type];
   const [config, setConfig] = useState<Record<string, unknown>>({ ...data.config });
 
   function set(key: string, value: unknown) {
     setConfig((c) => ({ ...c, [key]: value }));
   }
+
+  const variables = useMemo(() => buildVariables(ports, nodes, edges), [ports, nodes, edges]);
+
+  // a module field that is still empty gets the first connected module of that type
+  useEffect(() => {
+    for (const f of def.fields) {
+      if (f.type !== 'module' || config[f.key]) continue;
+      const first = modulesOfType(ports, f.moduleType!)[0];
+      if (first?.name) setConfig((c) => ({ ...c, [f.key]: first.name }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ports]);
 
   const rows = (config.registerTable as RegisterTableRow[]) ?? [];
   function updateRow(i: number, patch: Partial<RegisterTableRow>) {
@@ -60,6 +79,40 @@ export default function NodeConfigModal({ data, onSave, onClose }: Props) {
                   </tbody>
                 </table>
                 <button type="button" className="btn" onClick={addRow}>+ Регистр</button>
+              </div>
+            );
+          }
+          if (f.type === 'module') {
+            const mods = modulesOfType(ports, f.moduleType!);
+            const cur = String(config[f.key] ?? '');
+            const known = mods.some((m) => m.name === cur);
+            return (
+              <label key={f.key} style={{ display: 'block', fontSize: 12, color: 'var(--muted)', margin: '0 0 10px' }}>
+                {f.label}
+                <div style={{ marginTop: 4 }}>
+                  <select value={cur} onChange={(e) => set(f.key, e.target.value)} style={{ width: '100%' }}>
+                    {cur && !known && <option value={cur}>{cur} (не подключён)</option>}
+                    {!cur && mods.length === 0 && <option value="">нет подключённых модулей</option>}
+                    {mods.map((m) => (
+                      <option key={m.id} value={m.name}>{m.name} — отсек {m.slot}</option>
+                    ))}
+                  </select>
+                </div>
+              </label>
+            );
+          }
+          if (f.type === 'variable') {
+            return (
+              <div key={f.key} style={{ display: 'block', fontSize: 12, color: 'var(--muted)', margin: '0 0 10px' }}>
+                {f.label}
+                <div style={{ marginTop: 4 }}>
+                  <VariableInput
+                    value={String(config[f.key] ?? '')}
+                    onChange={(v) => set(f.key, v)}
+                    options={variables}
+                    placeholder="начните вводить имя переменной"
+                  />
+                </div>
               </div>
             );
           }

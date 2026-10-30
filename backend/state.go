@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -14,7 +16,8 @@ import (
 
 type PortState struct {
 	ID           string  `json:"id"`
-	Kind         string  `json:"kind"` // fixed | link | module
+	Name         string  `json:"name,omitempty"` // modules: RS485-0, Relay-0, ...
+	Kind         string  `json:"kind"`           // fixed | link | module
 	Connected    bool    `json:"connected"`
 	Slot         int     `json:"slot,omitempty"`
 	DetectedType *string `json:"detectedType,omitempty"` // modules: "rs485" | "relay"
@@ -22,6 +25,31 @@ type PortState struct {
 	AdcRaw       int64   `json:"adcRaw,omitempty"`
 	AdcOk        bool    `json:"adcOk,omitempty"`
 	Relays       []bool  `json:"relays,omitempty"` // relay module: channel states
+}
+
+// EthInfo is what the daemon reports about the Ethernet interface (right-click on "ethernet1").
+type EthInfo struct {
+	Iface     string `json:"iface"`
+	Exists    bool   `json:"exists"`
+	Up        bool   `json:"up"` // carrier
+	Operstate string `json:"operstate"`
+	Speed     int64  `json:"speed"` // Mbit/s, -1 = unknown
+	Duplex    string `json:"duplex"`
+	Mac       string `json:"mac"`
+	IP        string `json:"ip"`
+	Mask      string `json:"mask"`
+	MTU       int64  `json:"mtu"`
+	RxBytes   int64  `json:"rxBytes"`
+	TxBytes   int64  `json:"txBytes"`
+	RxPackets int64  `json:"rxPackets"`
+	TxPackets int64  `json:"txPackets"`
+	RxErrors  int64  `json:"rxErrors"`
+	TxErrors  int64  `json:"txErrors"`
+	RxDropped int64  `json:"rxDropped"`
+	TxDropped int64  `json:"txDropped"`
+	RxRate    int64  `json:"rxRate"` // bytes/s
+	TxRate    int64  `json:"txRate"`
+	TS        int64  `json:"ts"`
 }
 
 type LedState struct {
@@ -73,7 +101,7 @@ const (
 	nSlots     = 2
 	nLeds      = 3
 	nButtons   = 3
-	nRelays    = 4
+	nRelays    = 1 // a relay module has a single channel
 )
 
 // ---- persisted data (module settings, register tables, scenarios) --------
@@ -105,6 +133,7 @@ type Store struct {
 	system   *SystemInfo
 	history  []SystemSample
 	links    map[string]bool
+	eth      *EthInfo
 	term     [nSlots][]RS485Entry
 	data     persisted
 	dirty    bool
@@ -198,12 +227,53 @@ func (s *Store) Scenario(id string) (json.RawMessage, bool) {
 
 // ---- views ------------------------------------------------------------------
 
+// moduleNamesLocked: connected modules are named per type in slot order: RS485-0, RS485-1, Relay-0, ...
+func (s *Store) moduleNamesLocked() [nSlots]string {
+	var names [nSlots]string
+	count := map[string]int{}
+	for i, sl := range s.slots {
+		if !sl.connected {
+			continue
+		}
+		base := "RS485"
+		if sl.typ == "relay" {
+			base = "Relay"
+		}
+		names[i] = fmt.Sprintf("%s-%d", base, count[base])
+		count[base]++
+	}
+	return names
+}
+
+// ModuleName returns "" for an empty slot.
+func (s *Store) ModuleName(slot int) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if slot < 1 || slot > nSlots {
+		return ""
+	}
+	return s.moduleNamesLocked()[slot-1]
+}
+
+// SlotByName: "RS485-0" / "relay-0" -> slot number, 0 when no such module is connected.
+func (s *Store) SlotByName(name string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i, n := range s.moduleNamesLocked() {
+		if n != "" && strings.EqualFold(n, strings.TrimSpace(name)) {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 func moduleID(slot int) string { return "module" + string(rune('0'+slot)) }
 
 func (s *Store) modulePortLocked(i int) PortState {
 	sl := s.slots[i]
 	p := PortState{ID: moduleID(i + 1), Kind: "module", Slot: i + 1, Connected: sl.connected,
 		AdcPercent: sl.pct, AdcRaw: sl.raw, AdcOk: sl.adcOk}
+	p.Name = s.moduleNamesLocked()[i]
 	if sl.connected {
 		t := sl.typ
 		p.DetectedType = &t
@@ -330,8 +400,10 @@ func (s *Store) SetDaemonUp(up bool) {
 		for i := range s.slots {
 			s.slots[i] = slotInfo{}
 		}
+		s.eth = nil
+		s.links["ethernet1"] = false
 	}
-	ports := []PortState{s.modulePortLocked(0), s.modulePortLocked(1)}
+	ports := []PortState{s.modulePortLocked(0), s.modulePortLocked(1), {ID: "ethernet1", Kind: "link", Connected: false}}
 	s.mu.Unlock()
 	if changed {
 		for _, p := range ports {
@@ -356,9 +428,12 @@ func (s *Store) UpdateSlot(slot int, module string, raw int64, pct float64, adcO
 	}
 	changed := old.connected != sl.connected || old.typ != sl.typ || old.adcOk != sl.adcOk
 	p := s.modulePortLocked(slot - 1)
+	all := []PortState{s.modulePortLocked(0), s.modulePortLocked(1)}
 	s.mu.Unlock()
 	if changed {
-		s.hub.Publish("port_state", p)
+		for _, q := range all { // names of the other slot can change too (RS485-0 -> RS485-1)
+			s.hub.Publish("port_state", q)
+		}
 	} else {
 		s.hub.Publish("port_adc", map[string]any{"id": p.ID, "adcPercent": pct, "adcRaw": raw})
 	}
@@ -443,6 +518,23 @@ func (s *Store) UpdateSystem(si SystemInfo) {
 	}
 	s.mu.Unlock()
 	s.hub.Publish("system_info", si)
+}
+
+func (s *Store) UpdateEthernet(e EthInfo) {
+	s.mu.Lock()
+	s.eth = &e
+	s.mu.Unlock()
+	s.hub.Publish("ethernet", e)
+	s.SetLink("ethernet1", e.Up)
+}
+
+func (s *Store) Ethernet() (EthInfo, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.eth == nil {
+		return EthInfo{}, false
+	}
+	return *s.eth, true
 }
 
 func (s *Store) SetLink(id string, up bool) {

@@ -45,6 +45,9 @@ func loadConfig(path string) Config {
 		if !ok {
 			continue
 		}
+		if i := strings.Index(v, "#"); i >= 0 {
+			v = v[:i]
+		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		switch k {
 		case "socket":

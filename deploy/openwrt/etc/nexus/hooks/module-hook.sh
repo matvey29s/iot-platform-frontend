@@ -10,7 +10,7 @@
 # Always set: NEXUS_SLOT, NEXUS_UART_DEV.
 #
 # Pin map of this board (AM335x). Only the PAD MULTIPLEXER is switched here, by
-# writing the Control Module registers (base 0x44E10000) with `devmem`.
+# writing the Control Module registers (base 0x44E10000) with `io`.
 # GPIO directions/levels, the UART and the relays are handled by nexusd itself.
 #
 #   slot  UART TXD pad (offset)      UART RXD pad (offset)       two more GPIO pads
@@ -18,7 +18,7 @@
 #   2     gpmc_wpn   0x874 (mode 6)  gpmc_wait0 0x870 (mode 6)   GPIO_48  (pad 0x840), GPIO_60  (pad 0x878)
 #
 #   uart  (RS-485 module): TXD/RXD pads -> UART; the two GPIO pads -> GPIO (DE and /RE lines)
-#   gpio  (relay module) : all four pads -> GPIO mode 7 (4 relay channels)
+#   gpio  (relay module) : TXD pad -> GPIO output (the single relay channel), RXD pad -> GPIO input
 #   none  (empty slot)   : all four pads -> GPIO mode 7 as inputs (high-Z)
 
 SLOT="$1"
@@ -38,15 +38,22 @@ case "$SLOT" in
   *) echo "bad slot '$SLOT'" >&2; exit 2 ;;
 esac
 
-# write one pad configuration register
+# write one pad configuration register using the OpenWrt `io` tool
+# (also accepts busybox devmem / devmem2 if present)
 pad() {  # pad <offset> <value>
   addr=$(printf '0x%08X' $((CM_BASE + $1)))
-  if command -v devmem >/dev/null 2>&1; then
-    devmem "$addr" 32 "$2"
+  val=$(printf '0x%X' $(($2)))
+  if command -v io >/dev/null 2>&1; then
+    out=$(io -4 -w "$addr" "$val" 2>&1) || out2=$(io -4 "$addr" "$val" 2>&1) || { log "io write $addr=$val failed: $out / $out2"; return 1; }
+    got=$(io -4 -r "$addr" 2>&1 | awk '{print $NF}')
+    log "pad $addr <- $val (read back: $got)"
+    return 0
+  elif command -v devmem >/dev/null 2>&1; then
+    devmem "$addr" 32 "$val"
   elif command -v devmem2 >/dev/null 2>&1; then
-    devmem2 "$addr" w "$2" >/dev/null
+    devmem2 "$addr" w "$val" >/dev/null
   else
-    log "neither devmem nor devmem2 found - cannot switch pins (opkg install devmem2)"; return 1
+    log "no io/devmem/devmem2 found - cannot switch pins (opkg install io)"; return 1
   fi
 }
 
@@ -56,8 +63,8 @@ pins_uart() {
 }
 
 pins_gpio() {
-  pad "$TX_OFF" $((PAD_OUT | 7)) && pad "$RX_OFF" $((PAD_OUT | 7)) &&
-    pad "$GPIO_A_OFF" $((PAD_OUT | 7)) && pad "$GPIO_B_OFF" $((PAD_OUT | 7))
+  # relay module: ONE channel on the UART TX pad -> plain GPIO output; RX pad -> GPIO input
+  pad "$TX_OFF" $((PAD_OUT | 7)) && pad "$RX_OFF" "$PAD_IN"
 }
 
 pins_none() {

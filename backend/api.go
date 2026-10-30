@@ -49,6 +49,8 @@ func (a *API) routes() http.Handler {
 	mux.HandleFunc("POST /api/scenarios/{id}/stop", a.stopScenario)
 	mux.HandleFunc("GET /api/scenarios/status", a.scenarioStatus)
 	mux.HandleFunc("GET /api/io", a.io)
+	mux.HandleFunc("GET /api/ethernet", a.ethernet)
+	mux.HandleFunc("POST /api/modules/{id}/relay", a.relaySet)
 	mux.HandleFunc("GET /api/rs485/{slot}/log", a.rs485Log)
 	mux.HandleFunc("POST /api/rs485/{slot}/send", a.rs485Send)
 	mux.Handle("GET /api/events", a.hub)
@@ -141,7 +143,7 @@ func (a *API) defaultConfig(id string) (any, bool) {
 	if typ == "rs485" {
 		return Rs485Config{9600, "none", 8, 1, a.cfg.UartDev[slot-1], "modbus_rtu"}, true
 	}
-	return RelayConfig{4, "all_off"}, true
+	return RelayConfig{1, "all_off"}, true
 }
 
 func (a *API) getModuleConfig(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +196,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 		store = c
 	default:
 		var c RelayConfig
-		if json.Unmarshal(body, &c) != nil || c.Channels < 1 || c.Channels > 4 ||
+		if json.Unmarshal(body, &c) != nil || c.Channels != 1 ||
 			(c.SafeState != "keep" && c.SafeState != "all_off" && c.SafeState != "all_on") {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": "Недопустимые параметры реле"})
 			return
@@ -291,6 +293,35 @@ func (a *API) scenarioStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) io(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.st.IO()) }
+
+func (a *API) ethernet(w http.ResponseWriter, r *http.Request) {
+	e, ok := a.st.Ethernet()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "нет данных от daemon"})
+		return
+	}
+	writeJSON(w, 200, e)
+}
+
+// POST /api/modules/module1/relay {"on":true}  (the relay module has a single channel)
+func (a *API) relaySet(w http.ResponseWriter, r *http.Request) {
+	slot := slotFromID(r.PathValue("id"))
+	var in struct{ On bool }
+	body, _ := readBody(r)
+	if slot == 0 || json.Unmarshal(body, &in) != nil {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	if typ, ok := a.st.SlotType(slot); !ok || typ != "relay" {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "В этом слоте нет модуля реле"})
+		return
+	}
+	if err := a.dc.SetRelay(slot, 1, in.On); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
 
 func (a *API) rs485Log(w http.ResponseWriter, r *http.Request) {
 	slot, _ := strconv.Atoi(r.PathValue("slot"))

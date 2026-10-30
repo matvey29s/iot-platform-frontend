@@ -1,4 +1,5 @@
 import type {
+  EthInfo,
   AuthResult,
   IOState,
   RS485Entry,
@@ -63,8 +64,8 @@ function seed() {
   db.ports.set('power', { id: 'power', kind: 'fixed', connected: true });
   db.ports.set('ethernet1', { id: 'ethernet1', kind: 'link', connected: true });
   db.ports.set('sdcard', { id: 'sdcard', kind: 'fixed', connected: true });
-  db.ports.set('module1', { id: 'module1', kind: 'module', slot: 1, connected: true, detectedType: 'rs485', adcPercent: 16.4, adcRaw: 671, adcOk: true });
-  db.ports.set('module2', { id: 'module2', kind: 'module', slot: 2, connected: true, detectedType: 'relay', adcPercent: 91.6, adcRaw: 3751, adcOk: true, relays: [false, true, false, false] });
+  db.ports.set('module1', { id: 'module1', name: 'RS485-0', kind: 'module', slot: 1, connected: true, detectedType: 'rs485', adcPercent: 16.4, adcRaw: 671, adcOk: true });
+  db.ports.set('module2', { id: 'module2', name: 'Relay-0', kind: 'module', slot: 2, connected: true, detectedType: 'relay', adcPercent: 91.6, adcRaw: 3751, adcOk: true, relays: [false] });
   db.moduleConfigs.set('module1', {
     baudRate: 9600,
     parity: 'none',
@@ -73,7 +74,7 @@ function seed() {
     devicePath: '/dev/ttyS1',
     protocol: 'modbus_rtu'
   } as Rs485Config);
-  db.moduleConfigs.set('module2', { channels: 4, safeState: 'all_off' } as RelayConfig);
+  db.moduleConfigs.set('module2', { channels: 1, safeState: 'all_off' } as RelayConfig);
 
   db.registerTables.set('module1', [
     { byteIndex: 0, name: 'temperature', dataType: 'int16', description: 'Температура, x0.1°C' },
@@ -114,6 +115,21 @@ export async function fetchIO(): Promise<IOState> {
 }
 
 const mockLog: RS485Entry[] = [];
+export async function fetchEthernet(): Promise<EthInfo> {
+  return {
+    iface: 'eth0', exists: true, up: true, operstate: 'up', speed: 100, duplex: 'full', mac: '4c:ba:d7:00:11:22',
+    ip: '192.168.1.70', mask: '255.255.255.0', mtu: 1500, rxBytes: 12345678, txBytes: 2345678, rxPackets: 23456,
+    txPackets: 12345, rxErrors: 0, txErrors: 0, rxDropped: 0, txDropped: 0, rxRate: 1200, txRate: 340, ts: Date.now()
+  };
+}
+export async function setRelay(portId: string, on: boolean): Promise<{ ok: boolean; error?: string }> {
+  const p = db.ports.get(portId);
+  if (!p || p.detectedType !== 'relay') return { ok: false, error: 'В этом слоте нет модуля реле' };
+  const next = { ...p, relays: [on] };
+  db.ports.set(portId, next);
+  emit({ type: 'port_state', payload: next });
+  return { ok: true };
+}
 export async function fetchRs485Log(_slot: number): Promise<RS485Entry[]> {
   return [...mockLog];
 }

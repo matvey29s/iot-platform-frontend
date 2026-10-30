@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import * as api from '../api';
-import type { ModuleType, RegisterTableRow, Rs485Config, RelayConfig } from '../api/types';
+import type { ModuleType, RegisterTableRow, Rs485Config } from '../api/types';
 
 interface Props {
   portId: string;
+  /** Shown in the title, e.g. RS485-0 */
+  title?: string;
   moduleType: ModuleType;
   onClose: () => void;
 }
@@ -17,12 +19,9 @@ const DEFAULT_RS485: Rs485Config = {
   protocol: 'modbus_rtu'
 };
 
-const DEFAULT_RELAY: RelayConfig = { channels: 4, safeState: 'all_off' };
-
-export default function ModuleConfigModal({ portId, moduleType, onClose }: Props) {
+export default function ModuleConfigModal({ portId, title, moduleType, onClose }: Props) {
   const [tab, setTab] = useState<'port' | 'registers'>('port');
   const [rs485, setRs485] = useState<Rs485Config>(DEFAULT_RS485);
-  const [relay, setRelay] = useState<RelayConfig>(DEFAULT_RELAY);
   const [rows, setRows] = useState<RegisterTableRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +30,6 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
     api.fetchModuleConfig(portId).then((cfg) => {
       if (!cfg) return;
       if (moduleType === 'rs485') setRs485(cfg as Rs485Config);
-      else setRelay(cfg as RelayConfig);
     });
     if (moduleType === 'rs485') {
       api.fetchRegisterTable(portId).then(setRows);
@@ -42,7 +40,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
     e.preventDefault();
     setSaving(true);
     setError(null);
-    const res = await api.saveModuleConfig(portId, moduleType === 'rs485' ? rs485 : relay);
+    const res = await api.saveModuleConfig(portId, rs485);
     setSaving(false);
     if (!res.ok) return setError(res.error ?? 'Ошибка сохранения');
     onClose();
@@ -68,7 +66,7 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
     <div style={styles.backdrop} onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="card" style={styles.modal}>
         <h2 style={{ fontSize: 16, margin: '0 0 4px' }}>
-          Модуль {portId.replace('module', '')} — {moduleType === 'rs485' ? 'RS-485' : 'Реле'}
+          {title ?? `Модуль ${portId.replace('module', '')}`} — параметры порта
         </h2>
 
         {moduleType === 'rs485' && (
@@ -155,22 +153,6 @@ export default function ModuleConfigModal({ portId, moduleType, onClose }: Props
           </div>
         )}
 
-        {moduleType === 'relay' && (
-          <form onSubmit={savePort} style={styles.form}>
-            <Field label="Число каналов">
-              <input type="number" min={1} max={4} value={relay.channels} onChange={(e) => setRelay({ ...relay, channels: Number(e.target.value) })} />
-            </Field>
-            <Field label="Состояние при потере связи">
-              <select value={relay.safeState} onChange={(e) => setRelay({ ...relay, safeState: e.target.value as RelayConfig['safeState'] })}>
-                <option value="keep">Сохранить</option>
-                <option value="all_off">Все выключить</option>
-                <option value="all_on">Все включить</option>
-              </select>
-            </Field>
-            {error && <div style={{ color: 'var(--danger)', fontSize: 12 }}>{error}</div>}
-            <Actions onClose={onClose} saving={saving} />
-          </form>
-        )}
       </div>
     </div>
   );

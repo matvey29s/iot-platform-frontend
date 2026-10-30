@@ -1,12 +1,23 @@
 import { useEffect, useState } from 'react';
 import * as api from '../api';
-import type { IOState, ModuleType, PortState } from '../api/types';
+import type { EthInfo, IOState, ModuleType, PortState } from '../api/types';
 import { BUTTON_META, LED_META, PORT_META } from '../data/portMeta';
+import ConfirmRelayDialog, { relayConfirmSkipped } from '../components/ConfirmRelayDialog';
 import DeviceDiagram from '../components/DeviceDiagram';
 import ModuleConfigModal from '../components/ModuleConfigModal';
 import Rs485Terminal from '../components/Rs485Terminal';
 
-const TYPE_LABEL: Record<string, string> = { rs485: 'RS-485 (UART)', relay: 'Реле (GPIO)' };
+const TYPE_LABEL: Record<string, string> = { rs485: 'модуль RS-485 (UART)', relay: 'релейный модуль (GPIO)' };
+
+function fmtBytes(n: number) {
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} МБ`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
+}
+function fmtRate(n: number) {
+  return `${fmtBytes(n)}/с`;
+}
 
 function ago(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -18,6 +29,11 @@ function ago(ms: number) {
 
 export default function DevicePage() {
   const [ports, setPorts] = useState<PortState[]>([]);
+  const [ready, setReady] = useState(false);
+  const [eth, setEth] = useState<EthInfo | null>(null);
+  const [ethPopover, setEthPopover] = useState<{ x: number; y: number } | null>(null);
+  const [confirmRelay, setConfirmRelay] = useState<{ portId: string; name: string; turnOn: boolean } | null>(null);
+  const [relayError, setRelayError] = useState<string | null>(null);
   const [io, setIo] = useState<IOState | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -27,7 +43,7 @@ export default function DevicePage() {
 
   useEffect(() => {
     const load = () => {
-      api.fetchPorts().then(setPorts).catch(() => {});
+      api.fetchPorts().then((p) => { setPorts(p); setReady(true); }).catch(() => setReady(true));
       api.fetchIO().then(setIo).catch(() => {});
     };
     load();
@@ -37,6 +53,8 @@ export default function DevicePage() {
         setPorts((prev) => (prev.some((p) => p.id === event.payload.id) ? prev.map((p) => (p.id === event.payload.id ? event.payload : p)) : [...prev, event.payload]));
       } else if (event.type === 'port_adc') {
         setPorts((prev) => prev.map((p) => (p.id === event.payload.id ? { ...p, adcPercent: event.payload.adcPercent, adcRaw: event.payload.adcRaw } : p)));
+      } else if (event.type === 'ethernet') {
+        setEth(event.payload);
       } else if (event.type === 'io_led') {
         const l = event.payload;
         setIo((cur) => (cur ? { ...cur, leds: cur.leds.map((x) => (x.n === l.n ? l : x)) } : cur));
@@ -62,6 +80,13 @@ export default function DevicePage() {
 
   function openContext(id: string, x: number, y: number) {
     setPopover(null);
+    setEthPopover(null);
+    setRelayError(null);
+    if (id === 'ethernet1') {
+      api.fetchEthernet().then(setEth).catch(() => setEth(null));
+      setEthPopover({ x, y });
+      return;
+    }
     const port = byId.get(id);
     if (!port || port.kind !== 'module' || !port.connected || !port.detectedType) return;
     if (port.detectedType === 'rs485') setTerminal(port.slot ?? 1);
@@ -70,53 +95,78 @@ export default function DevicePage() {
 
   function openSettings(slot: number) {
     const port = byId.get(`module${slot}`);
-    if (port?.detectedType) setConfigTarget({ id: `module${slot}`, type: port.detectedType });
+    if (port?.detectedType === 'rs485') setConfigTarget({ id: `module${slot}`, type: port.detectedType });
+  }
+
+  async function switchRelay(portId: string, turnOn: boolean) {
+    setConfirmRelay(null);
+    setRelayError(null);
+    const res = await api.setRelay(portId, turnOn);
+    if (!res.ok) setRelayError(res.error ?? 'Не удалось переключить реле');
+  }
+
+  function askRelay(portId: string, name: string, turnOn: boolean) {
+    if (relayConfirmSkipped()) void switchRelay(portId, turnOn);
+    else setConfirmRelay({ portId, name, turnOn });
   }
 
   const hint = hovered ? <Tooltip id={hovered} port={byId.get(hovered)} io={io} now={now} /> : null;
   const popPort = popover ? byId.get(`module${popover.slot}`) : undefined;
 
   return (
-    <div style={styles.page} onClick={() => setPopover(null)}>
+    <div style={styles.page} onClick={() => { setPopover(null); setEthPopover(null); }}>
       <header style={styles.header}>
         <h1 style={styles.title}>Устройство</h1>
         <p style={styles.hint}>
-          Наведите курсор на элемент для описания. ПКМ по модулю: RS-485 — терминал, реле — состояние каналов.
+          Наведите курсор на элемент для описания. ПКМ: по модулю RS-485 — терминал, по реле — состояние и управление, по Ethernet — данные интерфейса.
         </p>
       </header>
 
       <div style={styles.stage}>
         <div style={styles.diagram}>
-          <DeviceDiagram ports={ports} io={io} onHover={setHovered} onContextMenu={openContext} />
+          <DeviceDiagram ports={ports} ready={ready} io={io} onHover={setHovered} onContextMenu={openContext} />
         </div>
       </div>
 
       <div style={styles.tooltipSlot}>{hint}</div>
 
       {popover && popPort && (
-        <div className="card" style={{ ...styles.popover, left: Math.min(popover.x, window.innerWidth - 280), top: Math.min(popover.y, window.innerHeight - 260) }} role="dialog" onClick={(e) => e.stopPropagation()}>
-          <b>Модуль {popover.slot} — реле</b>
-          <div style={{ color: 'var(--muted)', fontSize: 12, margin: '2px 0 8px' }}>
+        <div className="card" style={{ ...styles.popover, left: Math.min(popover.x, window.innerWidth - 280), top: Math.min(popover.y, window.innerHeight - 220) }} role="dialog" onClick={(e) => e.stopPropagation()}>
+          <b>{popPort.name ?? 'Реле'}</b>
+          <div style={{ color: 'var(--muted)', fontSize: 12, margin: '2px 0 10px' }}>
             АЦП: {popPort.adcOk ? `${(popPort.adcPercent ?? 0).toFixed(1)}%` : 'нет данных'}
           </div>
-          {[0, 1, 2, 3].map((i) => {
-            const on = !!popPort.relays?.[i];
+          {(() => {
+            const on = !!popPort.relays?.[0];
             return (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 24, padding: '3px 0', fontSize: 13 }}>
-                <span>Канал {i + 1}</span>
-                <span style={{ color: on ? 'var(--success)' : 'var(--muted)', fontWeight: 600 }}>● {on ? 'включено' : 'выключено'}</span>
-              </div>
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, padding: '3px 0 10px', fontSize: 13 }}>
+                  <span>Состояние</span>
+                  <span style={{ color: on ? 'var(--success)' : 'var(--muted)', fontWeight: 600 }}>● {on ? 'включено' : 'выключено'}</span>
+                </div>
+                <button className={`btn ${on ? '' : 'primary'}`} style={{ width: '100%' }} onClick={() => askRelay(popPort.id, popPort.name ?? 'Relay', !on)}>
+                  {on ? 'Выключить реле' : 'Включить реле'}
+                </button>
+              </>
             );
-          })}
-          <button className="btn" style={{ marginTop: 10, width: '100%' }} onClick={() => { setPopover(null); openSettings(popover.slot); }}>
-            Настройки модуля
-          </button>
+          })()}
+          {relayError && <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>{relayError}</div>}
         </div>
       )}
 
-      {terminal !== null && <Rs485Terminal slot={terminal} onClose={() => setTerminal(null)} onSettings={() => openSettings(terminal)} />}
+      {ethPopover && (
+        <div className="card" style={{ ...styles.popover, minWidth: 300, left: Math.min(ethPopover.x, window.innerWidth - 340), top: Math.min(ethPopover.y, window.innerHeight - 420) }} role="dialog" onClick={(e) => e.stopPropagation()}>
+          <EthernetPanel eth={eth} />
+        </div>
+      )}
 
-      {configTarget && <ModuleConfigModal portId={configTarget.id} moduleType={configTarget.type} onClose={() => setConfigTarget(null)} />}
+      {terminal !== null && <Rs485Terminal slot={terminal} name={byId.get(`module${terminal}`)?.name} onClose={() => setTerminal(null)} onSettings={() => openSettings(terminal)} />}
+
+      {confirmRelay && (
+        <ConfirmRelayDialog name={confirmRelay.name} turnOn={confirmRelay.turnOn} onCancel={() => setConfirmRelay(null)} onConfirm={() => void switchRelay(confirmRelay.portId, confirmRelay.turnOn)} />
+      )}
+
+      {configTarget && <ModuleConfigModal portId={configTarget.id} title={byId.get(configTarget.id)?.name} moduleType={configTarget.type} onClose={() => setConfigTarget(null)} />}
     </div>
   );
 }
@@ -179,16 +229,12 @@ function Tooltip({ id, port, io, now }: { id: string; port?: PortState; io: IOSt
       {port?.kind === 'module' ? (
         <div style={{ marginTop: 6 }}>
           <div style={{ color: port.connected ? 'var(--accent)' : 'var(--danger)' }}>
-            {port.connected ? `Подключён: ${TYPE_LABEL[port.detectedType ?? ''] ?? port.detectedType}` : 'Не подключён'}
+            {port.connected ? `Подключён: ${port.name ?? ''} — ${TYPE_LABEL[port.detectedType ?? ''] ?? port.detectedType}` : 'Не подключён'}
             <span style={{ color: 'var(--muted)' }}> · АЦП: {port.adcOk ? `${(port.adcPercent ?? 0).toFixed(1)}%` : 'нет данных'}</span>
           </div>
           {port.detectedType === 'relay' && (
-            <div style={{ marginTop: 4, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-              {[0, 1, 2, 3].map((i) => (
-                <span key={i} style={{ color: port.relays?.[i] ? 'var(--success)' : 'var(--muted)' }}>
-                  К{i + 1}: {port.relays?.[i] ? 'вкл' : 'выкл'}
-                </span>
-              ))}
+            <div style={{ marginTop: 4, color: port.relays?.[0] ? 'var(--success)' : 'var(--muted)' }}>
+              Реле: {port.relays?.[0] ? 'включено' : 'выключено'}
             </div>
           )}
         </div>
@@ -199,6 +245,40 @@ function Tooltip({ id, port, io, now }: { id: string; port?: PortState; io: IOSt
           </div>
         )
       )}
+    </div>
+  );
+}
+
+function EthernetPanel({ eth }: { eth: EthInfo | null }) {
+  if (!eth) return <div style={{ fontSize: 13, color: 'var(--muted)' }}>Нет данных от daemon.</div>;
+  const rows: Array<[string, string]> = [
+    ['Интерфейс', eth.iface],
+    ['Линк', !eth.exists ? 'интерфейс не найден' : eth.up ? 'есть' : 'нет'],
+    ['Скорость', eth.up && eth.speed > 0 ? `${eth.speed} Мбит/с, ${eth.duplex || '—'} duplex` : '—'],
+    ['IP-адрес', eth.ip ? `${eth.ip}${eth.mask ? ` / ${eth.mask}` : ''}` : '—'],
+    ['MAC', eth.mac || '—'],
+    ['MTU', eth.mtu ? String(eth.mtu) : '—'],
+    ['Принято', `${fmtBytes(eth.rxBytes)} · ${eth.rxPackets} пак. · ${fmtRate(eth.rxRate)}`],
+    ['Отправлено', `${fmtBytes(eth.txBytes)} · ${eth.txPackets} пак. · ${fmtRate(eth.txRate)}`],
+    ['Ошибки rx / tx', `${eth.rxErrors} / ${eth.txErrors}`],
+    ['Отброшено rx / tx', `${eth.rxDropped} / ${eth.txDropped}`]
+  ];
+  return (
+    <div>
+      <b>Ethernet 1</b>
+      <div style={{ color: 'var(--muted)', fontSize: 12, margin: '2px 0 8px' }}>
+        Данные получены от daemon · {new Date(eth.ts).toLocaleTimeString('ru-RU')}
+      </div>
+      <table style={{ fontSize: 12, borderCollapse: 'collapse', width: '100%' }}>
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <td style={{ color: 'var(--muted)', padding: '2px 14px 2px 0', whiteSpace: 'nowrap' }}>{k}</td>
+              <td style={{ padding: '2px 0', color: k === 'Линк' && eth.up ? 'var(--success)' : undefined }}>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

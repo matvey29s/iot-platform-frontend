@@ -9,8 +9,8 @@ export const PORT_META: Record<string, PortMeta> = {
   ethernet1: { title: 'Ethernet 1', description: 'Сетевой интерфейс. «Подключено» означает наличие линка (carrier).', connectTo: 'RJ45 кабель до ПК/коммутатора.' },
   sdcard: { title: 'SD Card', description: 'Съёмное хранилище. «Подключено», если карта смонтирована.', connectTo: 'microSD, class 10 и выше.' },
   mpu: { title: 'MPU', description: 'Процессор AM3352 (ARM Cortex-A8) под управлением Linux.', connectTo: 'Внутренний элемент, не для подключения.' },
-  module1: { title: 'Модуль 1', description: 'Тип определяется по АЦП канала 0: ≈16,4% от максимума — RS-485, ≈91,6% — реле (допуск ±5%).', connectTo: 'Модуль RS-485 или релейный модуль.' },
-  module2: { title: 'Модуль 2', description: 'Тип определяется по АЦП канала 1: ≈16,4% от максимума — RS-485, ≈91,6% — реле (допуск ±5%).', connectTo: 'Модуль RS-485 или релейный модуль.' }
+  module1: { title: 'Отсек 1', description: 'Тип определяется по АЦП канала 0: ≈16,4% от максимума — RS-485, ≈91,6% — реле (допуск ±5%).', connectTo: 'Модуль RS-485 или релейный модуль.' },
+  module2: { title: 'Отсек 2', description: 'Тип определяется по АЦП канала 1: ≈16,4% от максимума — RS-485, ≈91,6% — реле (допуск ±5%).', connectTo: 'Модуль RS-485 или релейный модуль.' }
 };
 
 /** Buttons are on the right edge of the picture, LEDs on the left; the first of each is fixed. */
