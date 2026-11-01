@@ -1258,7 +1258,7 @@
 							};
 
 							clkout2-pins {
-								pinctrl-single,pins = <0x1b4 0x00 0x03>;
+								pinctrl-single,pins = <0x1b4 0x08 0x07>;
 								phandle = <0x28>;
 							};
 
@@ -1297,6 +1297,11 @@
 								phandle = <0x5a>;
 							};
 
+							nexus_io_pins {
+								pinctrl-single,pins = <0x34 0x28 0x07 0x90 0x28 0x07 0x9c 0x28 0x07 0x44 0x28 0x07 0x198 0x28 0x07>;
+								phandle = <0x65>;
+							};
+
 							nexus_slot1_uart {
 								pinctrl-single,pins = <0x184 0x00 0x00 0x180 0x30 0x00 0x1a4 0x08 0x07 0x1ac 0x08 0x07>;
 								phandle = <0x5f>;
@@ -1313,17 +1318,17 @@
 							};
 
 							nexus_slot2_uart {
-								pinctrl-single,pins = <0x74 0x00 0x06 0x70 0x30 0x06 0x40 0x08 0x07 0x78 0x08 0x07>;
+								pinctrl-single,pins = <0x154 0x00 0x01 0x150 0x30 0x01 0x40 0x08 0x07 0x78 0x08 0x07>;
 								phandle = <0x62>;
 							};
 
 							nexus_slot2_gpio {
-								pinctrl-single,pins = <0x74 0x08 0x07 0x70 0x20 0x07>;
+								pinctrl-single,pins = <0x154 0x08 0x07 0x150 0x20 0x07>;
 								phandle = <0x63>;
 							};
 
 							nexus_slot2_none {
-								pinctrl-single,pins = <0x74 0x20 0x07 0x70 0x20 0x07 0x40 0x20 0x07 0x78 0x20 0x07>;
+								pinctrl-single,pins = <0x154 0x20 0x07 0x150 0x20 0x07 0x40 0x20 0x07 0x78 0x20 0x07>;
 								phandle = <0x64>;
 							};
 						};
@@ -1699,7 +1704,7 @@
 						clock-frequency = <0x2dc6c00>;
 						reg = <0x00 0x1000>;
 						interrupts = <0x4a>;
-						status = "disabled";
+						status = "okay";
 						dmas = <0x23 0x1e 0x00 0x23 0x1f 0x00>;
 						dma-names = "tx", "rx";
 					};
@@ -3389,11 +3394,10 @@
 				gpio-controller;
 				#gpio-cells = <0x02>;
 				status = "okay";
-				pinctrl-names = "default";
-				pinctrl-0 = <0x5a>;
 				ranges = <0x00 0x00 0x8000000 0x10000000>;
 
 				nand@0,0 {
+					status = "disabled";
 					compatible = "ti,omap2-nand";
 					reg = <0x00 0x00 0x04>;
 					nand-bus-width = <0x08>;
@@ -3490,20 +3494,22 @@
 		reg = <0x80000000 0x10000000>;
 	};
 
-	/* Client of the six states above: only needed so that pinctrl-single registers them as functions
-	 * (listed in /sys/kernel/debug/pinctrl/*/pinmux-functions) for the "pinmux-select" switch. */
+	// Client of the pin states above. "default" (nexus_io_pins) is applied at boot: buttons GPIO45/66/69 as
+	// inputs (receiver on), LEDs GPIO49/112/20 as GPIO outputs. The six nexus_slotN_* states only need to be
+	// registered as functions (see pinmux-functions in debugfs) for the pinmux-select switch used by the hook.
 	nexus-pinmux {
 		compatible = "simple-pm-bus";
 		#address-cells = <0x01>;
 		#size-cells = <0x01>;
 		ranges;
-		pinctrl-names = "nexus_slot1_uart", "nexus_slot1_gpio", "nexus_slot1_none", "nexus_slot2_uart", "nexus_slot2_gpio", "nexus_slot2_none";
-		pinctrl-0 = <0x5f>;
-		pinctrl-1 = <0x60>;
-		pinctrl-2 = <0x61>;
-		pinctrl-3 = <0x62>;
-		pinctrl-4 = <0x63>;
-		pinctrl-5 = <0x64>;
+		pinctrl-names = "default", "nexus_slot1_uart", "nexus_slot1_gpio", "nexus_slot1_none", "nexus_slot2_uart", "nexus_slot2_gpio", "nexus_slot2_none";
+		pinctrl-0 = <0x65>;
+		pinctrl-1 = <0x5f>;
+		pinctrl-2 = <0x60>;
+		pinctrl-3 = <0x61>;
+		pinctrl-4 = <0x62>;
+		pinctrl-5 = <0x63>;
+		pinctrl-6 = <0x64>;
 	};
 
 	leds {

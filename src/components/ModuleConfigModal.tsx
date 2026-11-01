@@ -15,7 +15,7 @@ const DEFAULT_RS485: Rs485Config = {
   parity: 'none',
   dataBits: 8,
   stopBits: 1,
-  devicePath: '/dev/ttyS1',
+  devicePath: '/dev/ttyO1',
   protocol: 'modbus_rtu'
 };
 
@@ -29,7 +29,10 @@ export default function ModuleConfigModal({ portId, title, moduleType, onClose }
   useEffect(() => {
     api.fetchModuleConfig(portId).then((cfg) => {
       if (!cfg) return;
-      if (moduleType === 'rs485') setRs485(cfg as Rs485Config);
+      // a config stored for another module type (after the modules were swapped) must not replace the defaults
+      const c = cfg as Partial<Rs485Config>;
+      if (moduleType === 'rs485' && typeof c.baudRate === 'number') setRs485({ ...DEFAULT_RS485, ...c });
+      else if (moduleType === 'rs485' && typeof c.devicePath === 'string') setRs485((prev) => ({ ...prev, devicePath: c.devicePath as string }));
     });
     if (moduleType === 'rs485') {
       api.fetchRegisterTable(portId).then(setRows);
@@ -109,7 +112,7 @@ export default function ModuleConfigModal({ portId, title, moduleType, onClose }
               </select>
             </Field>
             <Field label="Путь до устройства">
-              <input value={rs485.devicePath} readOnly title="Определяется платой (nexus.conf: uart_dev1/uart_dev2)" />
+              <input value={rs485.devicePath} readOnly title="Определяется платой (nexus.conf: slot1_uart / slot2_uart)" />
             </Field>
             <Field label="Протокол">
               <select value={rs485.protocol} onChange={(e) => setRs485({ ...rs485, protocol: e.target.value as Rs485Config['protocol'] })}>

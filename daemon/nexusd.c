@@ -83,6 +83,7 @@ typedef struct {
     int led_gpio[NLED], led_active_low;
     int relay_gpio[NSLOTS][NRELAY], relay_active_low;
     int de_gpio[NSLOTS], re_gpio[NSLOTS];
+    int drop_echo;
 } cfg_t;
 
 /* ---- GPIO line: character device (preferred) or sysfs fallback ---- */
@@ -169,8 +170,8 @@ static void cfg_defaults(void) {
     memset(&cfg, 0, sizeof cfg);
     snprintf(cfg.adc_path[0], sizeof cfg.adc_path[0], "/sys/bus/iio/devices/iio:device0/in_voltage0_raw");
     snprintf(cfg.adc_path[1], sizeof cfg.adc_path[1], "/sys/bus/iio/devices/iio:device0/in_voltage1_raw");
-    snprintf(cfg.uart_dev[0], sizeof cfg.uart_dev[0], "/dev/ttyS1");
-    snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "/dev/ttyS4");
+    snprintf(cfg.uart_dev[0], sizeof cfg.uart_dev[0], "/dev/ttyO1");
+    snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "/dev/ttyO2");
     snprintf(cfg.hook, sizeof cfg.hook, "/etc/nexus/hooks/module-hook.sh");
     snprintf(cfg.sock, sizeof cfg.sock, "/var/run/nexus/daemon.sock");
     snprintf(cfg.disk_path, sizeof cfg.disk_path, "/");
@@ -192,7 +193,7 @@ static void cfg_defaults(void) {
     cfg.btn_active_low = 0; /* pulled to ground, high level = pressed */
     cfg.led_active_low = 0;
     cfg.relay_gpio[0][0] = 15; /* GPIO0_15 = UART1_TXD pad */
-    cfg.relay_gpio[1][0] = 31; /* GPIO0_31 = UART4_TXD pad */
+    cfg.relay_gpio[1][0] = 3; /* GPIO0_3 = UART2_TXD pad (P9_21) */
     cfg.relay_active_low = 0;
     cfg.de_gpio[0] = 115; cfg.re_gpio[0] = 117;
     cfg.de_gpio[1] = 48;  cfg.re_gpio[1] = 60;
@@ -229,8 +230,8 @@ static void cfg_load(const char *path) {
         else if (!strcmp(k, "adc_ain0")) cfg.adc_ain[0] = atoi(v) & 7;
         else if (!strcmp(k, "adc_ain1")) cfg.adc_ain[1] = atoi(v) & 7;
         else if (!strcmp(k, "mem_dev")) snprintf(cfg.mem_dev, sizeof cfg.mem_dev, "%s", v);
-        else if (!strcmp(k, "uart_dev1")) snprintf(cfg.uart_dev[0], sizeof cfg.uart_dev[0], "%s", v);
-        else if (!strcmp(k, "uart_dev2")) snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "%s", v);
+        else if (!strcmp(k, "uart_dev1") || !strcmp(k, "slot1_uart")) snprintf(cfg.uart_dev[0], sizeof cfg.uart_dev[0], "%s", v);
+        else if (!strcmp(k, "uart_dev2") || !strcmp(k, "slot2_uart")) snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "%s", v);
         else if (!strcmp(k, "hook")) snprintf(cfg.hook, sizeof cfg.hook, "%s", v);
         else if (!strcmp(k, "socket")) snprintf(cfg.sock, sizeof cfg.sock, "%s", v);
         else if (!strcmp(k, "disk_path")) snprintf(cfg.disk_path, sizeof cfg.disk_path, "%s", v);
@@ -245,14 +246,15 @@ static void cfg_load(const char *path) {
         else if (!strcmp(k, "btn_active_low")) cfg.btn_active_low = atoi(v);
         else if (!strcmp(k, "led_gpio")) parse_int_list(v, cfg.led_gpio, NLED);
         else if (!strcmp(k, "led_active_low")) cfg.led_active_low = atoi(v);
-        else if (!strcmp(k, "relay1_gpio")) cfg.relay_gpio[0][0] = atoi(v);
-        else if (!strcmp(k, "relay2_gpio")) cfg.relay_gpio[1][0] = atoi(v);
+        else if (!strcmp(k, "relay1_gpio") || !strcmp(k, "slot1_tx_gpio")) cfg.relay_gpio[0][0] = atoi(v);
+        else if (!strcmp(k, "relay2_gpio") || !strcmp(k, "slot2_tx_gpio")) cfg.relay_gpio[1][0] = atoi(v);
         else if (!strcmp(k, "eth1")) snprintf(cfg.eth_if, sizeof cfg.eth_if, "%s", v);
         else if (!strcmp(k, "relay_active_low")) cfg.relay_active_low = atoi(v);
-        else if (!strcmp(k, "rs485_de1")) cfg.de_gpio[0] = atoi(v);
-        else if (!strcmp(k, "rs485_re1")) cfg.re_gpio[0] = atoi(v);
-        else if (!strcmp(k, "rs485_de2")) cfg.de_gpio[1] = atoi(v);
-        else if (!strcmp(k, "rs485_re2")) cfg.re_gpio[1] = atoi(v);
+        else if (!strcmp(k, "rs485_drop_echo")) cfg.drop_echo = atoi(v);
+        else if (!strcmp(k, "rs485_de1") || !strcmp(k, "slot1_de")) cfg.de_gpio[0] = atoi(v);
+        else if (!strcmp(k, "rs485_re1") || !strcmp(k, "slot1_re")) cfg.re_gpio[0] = atoi(v);
+        else if (!strcmp(k, "rs485_de2") || !strcmp(k, "slot2_de")) cfg.de_gpio[1] = atoi(v);
+        else if (!strcmp(k, "rs485_re2") || !strcmp(k, "slot2_re")) cfg.re_gpio[1] = atoi(v);
         /* other keys belong to the backend - ignore */
     }
     fclose(f);
@@ -534,7 +536,7 @@ static int direct_read(int ain, long *out) {
     return -1;
 }
 
-static int adc_sample(int slot, long *out) {
+static int adc_once(int slot, long *out) {
     if (cfg.force_kind[slot] >= 0) { /* testing: pretend the ADC measured this module */
         double pct = cfg.force_kind[slot] == K_RS485 ? cfg.rs485_pct : cfg.force_kind[slot] == K_RELAY ? cfg.relay_pct : 0.0;
         *out = (long)(pct / 100.0 * cfg.adc_max + 0.5);
@@ -543,6 +545,25 @@ static int adc_sample(int slot, long *out) {
     if (cfg.adc_mode != 2 && read_adc(slot, cfg.adc_path[slot], sizeof cfg.adc_path[slot], out) == 0) return 0;
     if (cfg.adc_mode == 1 || access("/sys/bus/iio/devices", F_OK) == 0) return -1; /* IIO exists: do not fight the driver */
     return direct_read(cfg.adc_ain[slot], out);
+}
+
+/* The AM335x ADC needs time to settle when it switches channel (high-impedance dividers): the first conversion
+ * after a switch can still show the previous channel. Take 5, drop the first, use the median of the rest. */
+static int adc_sample(int slot, long *out) {
+    if (cfg.force_kind[slot] >= 0) return adc_once(slot, out);
+    long v[5];
+    int n = 0;
+    for (int k = 0; k < 5; k++) {
+        long x;
+        int r = adc_once(slot, &x);
+        if (r != 0) { if (k == 0) return -1; continue; }
+        if (k > 0) v[n++] = x;
+        usleep(4000);
+    }
+    if (n == 0) return -1;
+    for (int i = 1; i < n; i++) { long t = v[i]; int j = i - 1; while (j >= 0 && v[j] > t) { v[j + 1] = v[j]; j--; } v[j + 1] = t; }
+    *out = v[n / 2];
+    return 0;
 }
 
 static int classify(double pct) {
@@ -660,19 +681,26 @@ static void emit_rs485(int slot, const char *dir, const unsigned char *d, size_t
 
 /* ---------------------------------------------------------------- hook */
 
+static int run_hook_action(const char *slot_str, const char *action);
 static int run_hook(int slot, const char *action) {
+    char sl[16];
+    snprintf(sl, sizeof sl, "%d", slot + 1);
+    return run_hook_action(sl, action);
+}
+
+/* slot_str: "1" / "2" for a slot, "0" for board-wide actions (io) */
+static int run_hook_action(const char *slot_str, const char *action) {
     if (access(cfg.hook, X_OK) != 0) {
-        logf_("hook %s is not executable - pins NOT switched (slot %d -> %s)", cfg.hook, slot + 1, action);
+        logf_("hook %s is not executable - pins NOT switched (slot %s -> %s)", cfg.hook, slot_str, action);
         return -1;
     }
+    int slot = atoi(slot_str);
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        char sl[16];
-        snprintf(sl, sizeof sl, "%d", slot + 1);
-        setenv("NEXUS_SLOT", sl, 1);
-        setenv("NEXUS_UART_DEV", cfg.uart_dev[slot], 1);
-        execl(cfg.hook, cfg.hook, sl, action, (char *)NULL);
+        setenv("NEXUS_SLOT", slot_str, 1);
+        if (slot >= 1 && slot <= NSLOTS) setenv("NEXUS_UART_DEV", cfg.uart_dev[slot - 1], 1);
+        execl(cfg.hook, cfg.hook, slot_str, action, (char *)NULL);
         _exit(127);
     }
     int st = 0;
@@ -680,14 +708,14 @@ static int run_hook(int slot, const char *action) {
         pid_t r = waitpid(pid, &st, WNOHANG);
         if (r == pid) {
             int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
-            if (rc != 0) logf_("hook slot %d %s exited with %d", slot + 1, action, rc);
+            if (rc != 0) logf_("hook slot %s %s exited with %d", slot_str, action, rc);
             return rc;
         }
         usleep(50000);
     }
     kill(pid, SIGKILL);
     waitpid(pid, &st, 0);
-    logf_("hook slot %d %s timed out", slot + 1, action);
+    logf_("hook slot %s %s timed out", slot_str, action);
     return -1;
 }
 
@@ -913,9 +941,12 @@ static void fmt_eth(char *out, size_t n) {
 /* ---------------------------------------------------------------- buttons / LEDs */
 
 static void io_setup(void) {
+    /* pads of the buttons/LEDs must be GPIO (mode 7, receiver on): the hook applies the nexus_io_pins state */
+    run_hook_action("0", "io");
     for (int i = 0; i < NBTN; i++) {
         if (gpio_open(&btn[i], cfg.btn_gpio[i], 0, 0) != 0) logf_("cannot open button gpio %d", cfg.btn_gpio[i]);
         int v = gpio_get(&btn[i]);
+        logf_("button %d: gpio %d level %d at start", i + 1, cfg.btn_gpio[i], v);
         btn_state[i] = v < 0 ? 0 : (cfg.btn_active_low ? !v : v);
         btn_raw_last[i] = btn_state[i];
         btn_raw_n[i] = 0;
@@ -937,6 +968,7 @@ static void scan_buttons(void) {
         /* contact bounce is removed in hardware: every level change is an event */
         if (pressed != btn_state[i]) {
             btn_state[i] = pressed;
+            logf_("button %d (gpio %d): %s", i + 1, cfg.btn_gpio[i], pressed ? "pressed" : "released");
             fmt_button(msg, sizeof msg, i);
             broadcast(msg);
         }
@@ -946,7 +978,7 @@ static void scan_buttons(void) {
 static void led_apply(int i, int on) {
     char msg[OUTMAX];
     led_state[i] = on;
-    gpio_set(&led[i], cfg.led_active_low ? !on : on);
+    if (gpio_set(&led[i], cfg.led_active_low ? !on : on) != 0) logf_("led %d: cannot set gpio %d", i + 1, cfg.led_gpio[i]);
     fmt_led(msg, sizeof msg, i);
     broadcast(msg);
 }
@@ -1128,9 +1160,8 @@ static void cmd_rs485_tx(cli_t *c, const char *line) {
         if (mono_ms() > end) { ok = 0; break; }
     }
     if (ok) tcdrain(s->uart_fd);
-    tcflush(s->uart_fd, TCIFLUSH); /* drop our own echo, if any */
+    if (cfg.drop_echo) { tcflush(s->uart_fd, TCIFLUSH); s->rx_len = 0; } /* optional: drop our own echo */
     rs485_idle_levels(s);
-    s->rx_len = 0;
     if (ok) emit_rs485(slot, "tx", data, (size_t)n);
     reply_result(c, "rs485_tx_result", slot + 1, ok, ok ? "" : "write failed");
 }

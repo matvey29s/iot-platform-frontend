@@ -71,7 +71,7 @@ function seed() {
     parity: 'none',
     dataBits: 8,
     stopBits: 1,
-    devicePath: '/dev/ttyS1',
+    devicePath: '/dev/ttyO1',
     protocol: 'modbus_rtu'
   } as Rs485Config);
   db.moduleConfigs.set('module2', { channels: 1, safeState: 'all_off' } as RelayConfig);

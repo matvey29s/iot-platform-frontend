@@ -73,11 +73,11 @@ mkdir -p "$R/etc/nexus/hooks" "$APP/data"
 HOOK=$R/etc/nexus/hooks/module-hook.sh
 if [ ! -f "$CONF" ]; then
   cp "$HERE/etc/nexus/nexus.conf" "$CONF"
-elif ! grep -q '^conf_version=2' "$CONF"; then
+elif ! grep -q '^conf_version=4' "$CONF"; then
   # config from an older version: back it up, take the new one, keep the user's own settings
   cp "$CONF" "$CONF.bak"
   cp "$HERE/etc/nexus/nexus.conf" "$CONF"
-  for key in listen tolerance adc_mode adc_ain0 adc_ain1 slot1_force slot2_force uart_dev1 uart_dev2 eth1 period; do
+  for key in listen adc_mode adc_ain0 adc_ain1 slot1_force slot2_force eth1 period; do
     line=$(grep "^$key=" "$CONF.bak" | head -1 || true)
     [ -z "$line" ] && continue
     if grep -q -e "^$key=" -e "^#$key=" "$CONF"; then sed -i -e "s|^$key=.*|$line|" -e "s|^#$key=.*|$line|" "$CONF"; else echo "$line" >> "$CONF"; fi
@@ -87,7 +87,7 @@ else
   cp "$HERE/etc/nexus/nexus.conf" "$CONF.new"
   echo "Kept your $CONF (new defaults saved as $CONF.new)"
 fi
-if [ ! -f "$HOOK" ] || ! grep -q 'pinmux-select' "$HOOK"; then
+if [ ! -f "$HOOK" ] || ! grep -q 'spi0_d0' "$HOOK"; then
   [ -f "$HOOK" ] && cp "$HOOK" "$HOOK.bak" && echo "Old pin hook replaced (backup: $HOOK.bak)"
   cp "$HERE/etc/nexus/hooks/module-hook.sh" "$HOOK"
 else

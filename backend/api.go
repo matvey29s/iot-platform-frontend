@@ -151,10 +151,25 @@ func (a *API) getModuleConfig(w http.ResponseWriter, r *http.Request) {
 	a.st.mu.RLock()
 	raw, ok := a.st.data.ModuleConfigs[id]
 	a.st.mu.RUnlock()
+	// A stored config belongs to the module that used to stand in this slot. After the modules were swapped it has
+	// the wrong shape (a relay config for an RS-485 module and vice versa): ignore it and use the defaults.
 	if ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(raw)
-		return
+		typ, _ := a.st.SlotType(slotFromID(id))
+		switch typ {
+		case "rs485":
+			var c Rs485Config
+			if json.Unmarshal(raw, &c) == nil && c.BaudRate >= 1200 && c.Protocol != "" {
+				c.DevicePath = a.cfg.UartDev[slotFromID(id)-1] // always the real device of this slot
+				writeJSON(w, 200, c)
+				return
+			}
+		case "relay":
+			var c RelayConfig
+			if json.Unmarshal(raw, &c) == nil && c.Channels == 1 && c.SafeState != "" {
+				writeJSON(w, 200, c)
+				return
+			}
+		}
 	}
 	if def, ok := a.defaultConfig(id); ok {
 		writeJSON(w, 200, def)
@@ -180,7 +195,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 	var store any
 	switch typ {
 	case "rs485":
-		var c Rs485Config
+		c := Rs485Config{9600, "none", 8, 1, "", "modbus_rtu"} // fields the client leaves out keep their defaults
 		if json.Unmarshal(body, &c) != nil || c.BaudRate < 1200 || c.BaudRate > 921600 ||
 			(c.Parity != "none" && c.Parity != "even" && c.Parity != "odd") ||
 			(c.DataBits != 7 && c.DataBits != 8) || (c.StopBits != 1 && c.StopBits != 2) ||

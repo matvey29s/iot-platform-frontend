@@ -16,7 +16,7 @@
 #
 #   slot  UART TXD pad (offset)      UART RXD pad (offset)       two more GPIO pads
 #   1     uart1_txd  0x984 (mode 0)  uart1_rxd  0x980 (mode 0)   GPIO_115 (pad 0x9A4), GPIO_117 (pad 0x9AC)
-#   2     gpmc_wpn   0x874 (mode 6)  gpmc_wait0 0x870 (mode 6)   GPIO_48  (pad 0x840), GPIO_60  (pad 0x878)
+#   2     spi0_d0    0x954 (mode 1)  spi0_sclk  0x950 (mode 1)   GPIO_48  (pad 0x840), GPIO_60  (pad 0x878)   [UART2, P9_21/P9_22]
 #
 #   uart  (RS-485 module): TXD/RXD pads -> UART; the two GPIO pads -> GPIO (DE and /RE lines)
 #   gpio  (relay module) : TXD pad -> GPIO output (the single relay channel), RXD pad -> GPIO input
@@ -35,7 +35,8 @@ PAD_RX=0x30        # UART RX: receiver on, pull-up
 
 case "$SLOT" in
   1) TX_OFF=0x984; RX_OFF=0x980; UART_MODE=0; GPIO_A_OFF=0x9A4; GPIO_B_OFF=0x9AC ;;
-  2) TX_OFF=0x874; RX_OFF=0x870; UART_MODE=6; GPIO_A_OFF=0x840; GPIO_B_OFF=0x878 ;;
+  2) TX_OFF=0x954; RX_OFF=0x950; UART_MODE=1; GPIO_A_OFF=0x840; GPIO_B_OFF=0x878 ;;
+  0) ;;   # board-wide action (io)
   *) echo "bad slot '$SLOT'" >&2; exit 2 ;;
 esac
 
@@ -51,14 +52,14 @@ find_pinctrl() {
   [ -d "$PCROOT" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
   for d in "$PCROOT"/*; do
     [ -f "$d/pinmux-select" ] || continue
-    if grep -q "function: nexus_slot" "$d/pinmux-functions" 2>/dev/null; then PINCTRL_DIR=$d; return 0; fi
+    if grep -q "function [0-9]*: nexus_slot" "$d/pinmux-functions" 2>/dev/null; then PINCTRL_DIR=$d; return 0; fi
   done
   return 1
 }
 
 mux_state() {  # mux_state uart|gpio|none
   fn="nexus_slot${SLOT}_$1"
-  grp=$(sed -n "s/.*function: $fn, groups = \[ *\([^ ]*\).*/\1/p" "$PINCTRL_DIR/pinmux-functions" | head -1)
+  grp=$(sed -n "s/.*function [0-9]*: $fn, groups = \[ *\([^ ]*\).*/\1/p" "$PINCTRL_DIR/pinmux-functions" | head -1)
   [ -n "$grp" ] || grp=$fn
   if err=$(echo "$fn $grp" 2>&1 > "$PINCTRL_DIR/pinmux-select"); then
     log "pinmux: $fn selected"
@@ -91,6 +92,24 @@ switch_pins() {  # switch_pins uart|gpio|none
   if find_pinctrl; then mux_state "$1"; else "io_$1"; fi
 }
 
+# ---- board-wide (hook 0 io): pads of the programmable buttons and LEDs -> GPIO ----
+#   buttons GPIO66 (pad 0x890), GPIO69 (0x89C), GPIO45 (0x834): input, receiver ON, no pull (pulled to ground outside)
+#   LEDs    GPIO49 (0x844), GPIO112 (0x998), GPIO20 (0x9B4)   : GPIO output
+# device-pinmux.dts normally does this at boot (state "default" = nexus_io_pins); this is the second line of defence.
+io_board() {
+  PCROOT=${NEXUS_PINCTRL_ROOT:-/sys/kernel/debug/pinctrl}
+  [ -d "$PCROOT" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+  for d in "$PCROOT"/*; do
+    [ -f "$d/pinmux-select" ] || continue
+    grep -q "nexus_io_pins" "$d/pinmux-functions" 2>/dev/null || continue
+    if echo "nexus_io_pins nexus_io_pins" > "$d/pinmux-select" 2>/dev/null; then log "buttons/LEDs pads set via pinmux (nexus_io_pins)"; return 0; fi
+  done
+  ok=1
+  for o in 0x834 0x890 0x89C 0x844 0x998 0x9B4; do pad "$o" 0x2F || ok=0; done   # mode 7, no pull, receiver on
+  if [ "$ok" = 1 ]; then log "buttons/LEDs pads set with io"; else log "buttons/LEDs pads: no nexus_io_pins function and no /dev/mem - the dtb must provide them"; fi
+  return 0
+}
+
 configure_uart() {
   dev="$NEXUS_UART_DEV"
   [ -c "$dev" ] || { log "UART device $dev does not exist"; return 1; }
@@ -112,6 +131,7 @@ case "$ACTION" in
   uart)      log "RS-485 module -> pins as UART"; switch_pins uart || { log "pin switch FAILED"; exit 1; } ;;
   gpio)      log "relay module -> TX pin as GPIO"; switch_pins gpio || { log "pin switch FAILED"; exit 1; } ;;
   none)      log "no module";                     switch_pins none || { log "pin switch FAILED"; exit 1; } ;;
+  io)        io_board ;;
   configure) configure_uart ;;
-  *)         echo "usage: $0 <slot> uart|gpio|none|configure" >&2; exit 2 ;;
+  *)         echo "usage: $0 <slot> uart|gpio|none|configure   |   $0 0 io" >&2; exit 2 ;;
 esac

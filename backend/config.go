@@ -23,7 +23,7 @@ func defaultConfig() Config {
 		Listen:   "0.0.0.0:8080",
 		WWW:      "/opt/nexus-iot/www",
 		DataDir:  "/opt/nexus-iot/data",
-		UartDev:  [2]string{"/dev/ttyS1", "/dev/ttyS2"},
+		UartDev:  [2]string{"/dev/ttyO1", "/dev/ttyO2"},
 		EthIface: [2]string{"eth0", "eth1"},
 	}
 }
@@ -58,9 +58,9 @@ func loadConfig(path string) Config {
 			c.WWW = v
 		case "data":
 			c.DataDir = v
-		case "uart_dev1":
+		case "uart_dev1", "slot1_uart":
 			c.UartDev[0] = v
-		case "uart_dev2":
+		case "uart_dev2", "slot2_uart":
 			c.UartDev[1] = v
 		case "eth1":
 			c.EthIface[0] = v

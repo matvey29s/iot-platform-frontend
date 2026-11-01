@@ -77,13 +77,13 @@ sh install.sh                          # порт 8080; другой: sh install
 
   | Слот | UART | GPIO |
   |---|---|---|
-  | 1 | UART1_TXD (pad 0x984), UART1_RXD (0x980), `/dev/ttyS1` | GPIO_115, GPIO_117 |
-  | 2 | UART4_TXD (gpmc_wpn 0x874, режим 6), UART4_RXD (gpmc_wait0 0x870, режим 6), `/dev/ttyS4` | GPIO_48, GPIO_60 |
+  | 1 | UART1_TXD (pad 0x984), UART1_RXD (0x980), `/dev/ttyO1` | GPIO_115, GPIO_117 |
+  | 2 | UART2_TXD (spi0_d0 0x954, режим 1, P9_21), UART2_RXD (spi0_sclk 0x950, режим 1, P9_22), `/dev/ttyO2` | GPIO_48, GPIO_60 |
 
   RS-485: TXD/RXD → UART, две GPIO-линии — **DE и /RE** (в покое оба 0 = приём, при передаче оба 1).
   Реле: **один канал** = пин UART TXD, переключённый в GPIO (слот 1 — GPIO15, слот 2 — GPIO31;
-  `relay1_gpio`/`relay2_gpio`). Слот пуст: все пины — входы. Пины переключает хук через `pinmux-select` (debugfs) по состояниям из `dts/device-pinmux.dts`
-  (запасной вариант — утилита `io` и `CONFIG_DEVMEM=y`); UART1 и UART4 должны быть включены в device tree.
+  `slot1_tx_gpio`/`slot2_tx_gpio`). Слот пуст: все пины — входы. Пины переключает хук через `pinmux-select` (debugfs) по состояниям из `dts/device-pinmux.dts`
+  (запасной вариант — утилита `io` и `CONFIG_DEVMEM=y`); UART1 и UART2 должны быть включены в device tree.
   Внимание: площадки gpmc_wait0/gpmc_wpn (слот 2) в исходном dts заняты NAND-контроллером; если NAND используется, слот 2 работать не будет.
   Всё это допущения о вашей схеме — меняются в `nexus.conf`.
 - **Кнопки и светодиоды.** Первая кнопка (reset) и первый светодиод (питание) не программируются. Кнопки подтянуты к земле и
@@ -167,3 +167,16 @@ on the types in `types.ts`, so this swap is intentionally mechanical.
   pass; `startScenario()`/`stopScenario()` are stubs. This needs a real
   design decision on the backend (see architecture discussion: bytecode +
   interpreter recommended over transpiling to Lua/Go).
+
+
+## Пины по слотам и кнопки/светодиоды (важно)
+
+* Слот — это физический разъём: его пины зафиксированы платой (`slot1_*`, `slot2_*` в `nexus.conf`). Какой модуль стоит
+  в слоте, определяет АЦП каждые 3 с (16,4 % — RS-485, 91,6 % — реле, иначе пусто). Модули можно менять местами:
+  хук перенастроит пады именно этого слота, демон откроет нужные линии.
+* UART: `/dev/ttyO1` (слот 1) и `/dev/ttyO2` (слот 2) — имена драйвера omap-serial. Ожидаемый уровень TX/RX в покое = 1
+  (так выглядит свободная линия UART), по данным он меняется.
+* Кнопки GPIO66/69/45 и светодиоды GPIO49/112/20 требуют, чтобы пады были в режиме GPIO. В исходном dts пады 66/69 заняты
+  NAND (ALE/CLE, приёмник выключен — кнопка читалась как 0), а пад GPIO20 отдан под CLKOUT2. `dts/device-pinmux.dts`
+  отключает NAND, переводит пад GPIO20 в GPIO и задаёт состояние `default` (`nexus_io_pins`), которое применяется при
+  загрузке; при старте демон дополнительно вызывает `module-hook.sh 0 io`.
