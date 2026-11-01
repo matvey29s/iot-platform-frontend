@@ -30,12 +30,13 @@ CM_BASE=${NEXUS_CM_BASE:-0x44E10000}      # AM335x Control Module
 
 # pad value bits: [2:0] mode | [3] pull disable | [4] 1=pull-up | [5] receiver enable
 PAD_OUT=0x08       # output, pull disabled
-PAD_IN=0x27        # input (gpio mode 7), receiver on, pull-down
-PAD_RX=0x30        # UART RX: receiver on, pull-up
+PAD_IN=0x2F        # input (gpio mode 7), receiver on, NO pull (high impedance)
+PAD_RX=0x28        # UART RX: receiver on, no pull
 
 case "$SLOT" in
   1) TX_OFF=0x984; RX_OFF=0x980; UART_MODE=0; GPIO_A_OFF=0x9A4; GPIO_B_OFF=0x9AC ;;
   2) TX_OFF=0x874; RX_OFF=0x870; UART_MODE=6; GPIO_A_OFF=0x840; GPIO_B_OFF=0x878 ;;
+  0) ;;   # board-wide action (io)
   *) echo "bad slot '$SLOT'" >&2; exit 2 ;;
 esac
 
@@ -91,6 +92,24 @@ switch_pins() {  # switch_pins uart|gpio|none
   if find_pinctrl; then mux_state "$1"; else "io_$1"; fi
 }
 
+# ---- board-wide (hook 0 io): pads of the programmable buttons and LEDs -> GPIO ----
+#   buttons GPIO66 (pad 0x890), GPIO69 (0x89C), GPIO45 (0x834): input, receiver ON, no pull (pulled to ground outside)
+#   LEDs    GPIO49 (0x844), GPIO112 (0x998), GPIO20 (0x9B4)   : GPIO output
+# device-pinmux.dts normally does this at boot (state "default" = nexus_io_pins); this is the second line of defence.
+io_board() {
+  PCROOT=${NEXUS_PINCTRL_ROOT:-/sys/kernel/debug/pinctrl}
+  [ -d "$PCROOT" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+  for d in "$PCROOT"/*; do
+    [ -f "$d/pinmux-select" ] || continue
+    grep -q "nexus_io_pins" "$d/pinmux-functions" 2>/dev/null || continue
+    if echo "nexus_io_pins nexus_io_pins" > "$d/pinmux-select" 2>/dev/null; then log "buttons/LEDs pads set via pinmux (nexus_io_pins)"; return 0; fi
+  done
+  ok=1
+  for o in 0x834 0x890 0x89C 0x844 0x998 0x9B4; do pad "$o" 0x2F || ok=0; done   # mode 7, no pull, receiver on
+  if [ "$ok" = 1 ]; then log "buttons/LEDs pads set with io"; else log "buttons/LEDs pads: no nexus_io_pins function and no /dev/mem - the dtb must provide them"; fi
+  return 0
+}
+
 configure_uart() {
   dev="$NEXUS_UART_DEV"
   [ -c "$dev" ] || { log "UART device $dev does not exist"; return 1; }
@@ -112,6 +131,7 @@ case "$ACTION" in
   uart)      log "RS-485 module -> pins as UART"; switch_pins uart || { log "pin switch FAILED"; exit 1; } ;;
   gpio)      log "relay module -> TX pin as GPIO"; switch_pins gpio || { log "pin switch FAILED"; exit 1; } ;;
   none)      log "no module";                     switch_pins none || { log "pin switch FAILED"; exit 1; } ;;
+  io)        io_board ;;
   configure) configure_uart ;;
-  *)         echo "usage: $0 <slot> uart|gpio|none|configure" >&2; exit 2 ;;
+  *)         echo "usage: $0 <slot> uart|gpio|none|configure   |   $0 0 io" >&2; exit 2 ;;
 esac
