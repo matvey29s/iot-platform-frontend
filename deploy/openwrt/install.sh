@@ -87,7 +87,7 @@ else
   cp "$HERE/etc/nexus/nexus.conf" "$CONF.new"
   echo "Kept your $CONF (new defaults saved as $CONF.new)"
 fi
-if [ ! -f "$HOOK" ] || ! grep -q 'ONE channel' "$HOOK"; then
+if [ ! -f "$HOOK" ] || ! grep -q 'pinmux-select' "$HOOK"; then
   [ -f "$HOOK" ] && cp "$HOOK" "$HOOK.bak" && echo "Old pin hook replaced (backup: $HOOK.bak)"
   cp "$HERE/etc/nexus/hooks/module-hook.sh" "$HOOK"
 else
@@ -134,5 +134,5 @@ IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); p
 if [ -n "$IPS" ]; then for ip in $IPS; do echo "  http://$ip:$PORT/"; done
 else echo "  http://<device-ip>:$PORT/"; fi
 echo
-echo "Pins are switched by /etc/nexus/hooks/module-hook.sh (needs the io tool and CONFIG_DEVMEM in the kernel)."
+echo "Pins are switched by /etc/nexus/hooks/module-hook.sh (pinmux-select from dts/device-pinmux.dts, or the io tool + CONFIG_DEVMEM)."
 command -v io >/dev/null 2>&1 || command -v devmem >/dev/null 2>&1 || command -v devmem2 >/dev/null 2>&1 || echo "WARNING: no io/devmem found - install one (opkg install io), otherwise pins cannot be switched." >&2

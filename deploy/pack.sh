@@ -35,6 +35,7 @@ else
 fi
 
 cp -R deploy/openwrt/etc deploy/openwrt/init "$PKG/"
+cp -R deploy/dts "$PKG/dts"
 cp deploy/openwrt/install.sh "$PKG/install.sh"
 chmod 755 "$PKG/install.sh" "$PKG/bin/"*
 
