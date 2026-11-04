@@ -73,7 +73,7 @@ mkdir -p "$R/etc/nexus/hooks" "$APP/data"
 HOOK=$R/etc/nexus/hooks/module-hook.sh
 if [ ! -f "$CONF" ]; then
   cp "$HERE/etc/nexus/nexus.conf" "$CONF"
-elif ! grep -q '^conf_version=4' "$CONF"; then
+elif ! grep -q '^conf_version=5' "$CONF"; then
   # config from an older version: back it up, take the new one, keep the user's own settings
   cp "$CONF" "$CONF.bak"
   cp "$HERE/etc/nexus/nexus.conf" "$CONF"

@@ -96,6 +96,27 @@ export default function DeviceDiagram({ ports, ready, io, onHover, onContextMenu
         el.removeEventListener('contextmenu', ctx);
       });
     }
+    // variable names next to the programmable buttons (right edge) and LEDs (left edge)
+    const root = host.querySelector('svg');
+    if (root) {
+      const label = (txt: string, x: number, y: number, anchor: 'start' | 'end') => {
+        const t = document.createElementNS(SVG_NS, 'text') as SVGTextElement;
+        t.setAttribute('x', String(x));
+        t.setAttribute('y', String(y));
+        t.setAttribute('text-anchor', anchor);
+        t.setAttribute('fill', '#9fb2de');
+        t.setAttribute('font-size', '9');
+        t.setAttribute('font-family', 'Inter, system-ui, sans-serif');
+        t.style.pointerEvents = 'none';
+        t.textContent = txt;
+        root.appendChild(t);
+        cleanups.push(() => t.remove());
+      };
+      for (let n = 1; n <= 3; n++) {
+        label(`BTN-${n}`, 387, 134 + 32 * n + 16, 'end'); // btn2..btn4 sit at y = 166, 198, 230
+        label(`LED-${n}`, 33, 132 + 32 * n + 15, 'start'); // led2..led4 sit at y offsets 32, 64, 96
+      }
+    }
     return () => cleanups.forEach((c) => c());
   }, []);
 

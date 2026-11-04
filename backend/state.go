@@ -60,10 +60,12 @@ type LedState struct {
 type ButtonState struct {
 	N             int   `json:"n"` // 1..3 (programmable buttons)
 	Pressed       bool  `json:"pressed"`
-	LastPressedAt int64 `json:"lastPressedAt"` // epoch ms, 0 = never
+	LastPressedAt int64 `json:"lastPressedAt"` // epoch ms of the controller clock, 0 = never
+	Now           int64 `json:"now"`           // controller clock at the moment of the answer: the UI measures "N s ago" against it
 }
 
 type IOState struct {
+	Now     int64         `json:"now"`
 	Leds    []LedState    `json:"leds"`
 	Buttons []ButtonState `json:"buttons"`
 }
@@ -77,22 +79,24 @@ type RS485Entry struct {
 }
 
 type SystemInfo struct {
-	SampledAt       int64   `json:"sampledAt"`
-	LinuxVersion    string  `json:"linuxVersion"`
-	CPUModel        string  `json:"cpuModel"`
-	CPUUsagePercent float64 `json:"cpuUsagePercent"`
-	RAMTotalMb      float64 `json:"ramTotalMb"`
-	RAMUsedMb       float64 `json:"ramUsedMb"`
-	UptimeSeconds   float64 `json:"uptimeSeconds"`
-	DiskTotalMb     float64 `json:"diskTotalMb"`
-	DiskUsedMb      float64 `json:"diskUsedMb"`
+	SampledAt       int64     `json:"sampledAt"`
+	LinuxVersion    string    `json:"linuxVersion"`
+	CPUModel        string    `json:"cpuModel"`
+	CPUUsagePercent float64   `json:"cpuUsagePercent"`
+	Cores           []float64 `json:"cores"` // per-core load, %
+	RAMTotalMb      float64   `json:"ramTotalMb"`
+	RAMUsedMb       float64   `json:"ramUsedMb"`
+	UptimeSeconds   float64   `json:"uptimeSeconds"`
+	DiskTotalMb     float64   `json:"diskTotalMb"`
+	DiskUsedMb      float64   `json:"diskUsedMb"`
 }
 
 type SystemSample struct {
-	SampledAt       int64   `json:"sampledAt"`
-	CPUUsagePercent float64 `json:"cpuUsagePercent"`
-	RAMUsedMb       float64 `json:"ramUsedMb"`
-	RAMTotalMb      float64 `json:"ramTotalMb"`
+	SampledAt       int64     `json:"sampledAt"`
+	CPUUsagePercent float64   `json:"cpuUsagePercent"`
+	Cores           []float64 `json:"cores"`
+	RAMUsedMb       float64   `json:"ramUsedMb"`
+	RAMTotalMb      float64   `json:"ramTotalMb"`
 }
 
 const (
@@ -112,6 +116,7 @@ type persisted struct {
 	Scenarios     map[string]json.RawMessage `json:"scenarios"`
 	LastPressed   map[string]int64           `json:"lastPressed"`
 	Running       string                     `json:"running"` // scenario to resume after a reboot
+	Vars          map[string]VarDef          `json:"vars"`    // variable registry (key = upper-case name)
 }
 
 type slotInfo struct {
@@ -138,15 +143,20 @@ type Store struct {
 	data     persisted
 	dirty    bool
 	hub      *Hub
+
+	rt       map[string]rtVal // runtime values of non-hardware variables
+	manual   map[string]bool  // what the user set by hand on the Device tab ("relay1", ...): restored when a scenario stops
+	onModule func(slot int, typ string)
 }
 
 func NewStore(cfg Config, hub *Hub) *Store {
-	s := &Store{cfg: cfg, hub: hub, links: map[string]bool{}}
+	s := &Store{cfg: cfg, hub: hub, links: map[string]bool{}, rt: map[string]rtVal{}, manual: map[string]bool{}}
 	s.data = persisted{
 		ModuleConfigs: map[string]json.RawMessage{},
 		Registers:     map[string]json.RawMessage{},
 		Scenarios:     map[string]json.RawMessage{},
 		LastPressed:   map[string]int64{},
+		Vars:          map[string]VarDef{},
 	}
 	s.load()
 	go func() { // last-press times are flushed lazily so a button does not wear the flash
@@ -186,6 +196,9 @@ func (s *Store) load() {
 		s.data.LastPressed = p.LastPressed
 	}
 	s.data.Running = p.Running
+	if p.Vars != nil {
+		s.data.Vars = p.Vars
+	}
 }
 
 // saveLocked writes atomically (tmp + rename) so a power cut cannot leave a
@@ -305,12 +318,12 @@ func (s *Store) Ports() []PortState {
 func (s *Store) IO() IOState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := IOState{}
+	out := IOState{Now: time.Now().UnixMilli()}
 	for i := 0; i < nLeds; i++ {
 		out.Leds = append(out.Leds, LedState{N: i + 1, On: s.leds[i]})
 	}
 	for i := 0; i < nButtons; i++ {
-		out.Buttons = append(out.Buttons, ButtonState{N: i + 1, Pressed: s.buttons[i], LastPressedAt: s.data.LastPressed[itoa(i+1)]})
+		out.Buttons = append(out.Buttons, ButtonState{N: i + 1, Pressed: s.buttons[i], LastPressedAt: s.data.LastPressed[itoa(i+1)], Now: out.Now})
 	}
 	return out
 }
@@ -427,9 +440,15 @@ func (s *Store) UpdateSlot(slot int, module string, raw int64, pct float64, adcO
 		sl.relays = [nRelays]bool{}
 	}
 	changed := old.connected != sl.connected || old.typ != sl.typ || old.adcOk != sl.adcOk
+	appeared := sl.connected && (!old.connected || old.typ != sl.typ)
+	typ := sl.typ
+	cb := s.onModule
 	p := s.modulePortLocked(slot - 1)
 	all := []PortState{s.modulePortLocked(0), s.modulePortLocked(1)}
 	s.mu.Unlock()
+	if appeared && cb != nil {
+		go cb(slot, typ)
+	}
 	if changed {
 		for _, q := range all { // names of the other slot can change too (RS485-0 -> RS485-1)
 			s.hub.Publish("port_state", q)
@@ -453,7 +472,8 @@ func (s *Store) UpdateRelay(slot int, states []int) {
 	s.hub.Publish("port_state", p)
 }
 
-func (s *Store) UpdateButton(n int, pressed bool, ts int64) {
+func (s *Store) UpdateButton(n int, pressed bool, _ int64) {
+	ts := time.Now().UnixMilli() // our own clock, the same one that is reported as "now"
 	if n < 1 || n > nButtons {
 		return
 	}
@@ -463,7 +483,7 @@ func (s *Store) UpdateButton(n int, pressed bool, ts int64) {
 		s.data.LastPressed[itoa(n)] = ts
 		s.dirty = true
 	}
-	st := ButtonState{N: n, Pressed: pressed, LastPressedAt: s.data.LastPressed[itoa(n)]}
+	st := ButtonState{N: n, Pressed: pressed, LastPressedAt: s.data.LastPressed[itoa(n)], Now: ts}
 	s.mu.Unlock()
 	s.hub.Publish("io_button", st)
 }
@@ -512,7 +532,7 @@ func printable(b []byte) string {
 func (s *Store) UpdateSystem(si SystemInfo) {
 	s.mu.Lock()
 	s.system = &si
-	s.history = append(s.history, SystemSample{si.SampledAt, si.CPUUsagePercent, si.RAMUsedMb, si.RAMTotalMb})
+	s.history = append(s.history, SystemSample{si.SampledAt, si.CPUUsagePercent, si.Cores, si.RAMUsedMb, si.RAMTotalMb})
 	if len(s.history) > maxHistory {
 		s.history = s.history[len(s.history)-maxHistory:]
 	}

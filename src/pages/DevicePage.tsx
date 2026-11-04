@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import type { EthInfo, IOState, ModuleType, PortState } from '../api/types';
 import { BUTTON_META, LED_META, PORT_META } from '../data/portMeta';
@@ -39,14 +39,23 @@ export default function DevicePage() {
   const [now, setNow] = useState(Date.now());
   const [configTarget, setConfigTarget] = useState<{ id: string; type: ModuleType } | null>(null);
   const [terminal, setTerminal] = useState<number | null>(null);
+  const [ledMenu, setLedMenu] = useState<{ n: number; x: number; y: number } | null>(null);
+  const [ledMsg, setLedMsg] = useState<string | null>(null);
+  const [clockDiff, setClockDiff] = useState<number | null>(null); // controller clock minus browser clock, ms
+  const [clockMsg, setClockMsg] = useState<string | null>(null);
+  const offsetRef = useRef(0); // controller clock minus browser clock
   const [popover, setPopover] = useState<{ slot: number; x: number; y: number } | null>(null);
 
   useEffect(() => {
     const load = () => {
       api.fetchPorts().then((p) => { setPorts(p); setReady(true); }).catch(() => setReady(true));
-      api.fetchIO().then(setIo).catch(() => {});
+      api.fetchIO().then((v) => {
+        if (v.now) offsetRef.current = v.now - Date.now();
+        setIo(v);
+      }).catch(() => {});
     };
     load();
+    api.fetchClock().then((c) => setClockDiff(c.now - Date.now())).catch(() => {});
     const poll = setInterval(load, 5000); // safety net in case a live event was missed
     const unsub = api.subscribeLive((event) => {
       if (event.type === 'port_state') {
@@ -60,6 +69,7 @@ export default function DevicePage() {
         setIo((cur) => (cur ? { ...cur, leds: cur.leds.map((x) => (x.n === l.n ? l : x)) } : cur));
       } else if (event.type === 'io_button') {
         const b = event.payload;
+        if (b.now) offsetRef.current = b.now - Date.now();
         setIo((cur) => (cur ? { ...cur, buttons: cur.buttons.map((x) => (x.n === b.n ? b : x)) } : cur));
       }
     });
@@ -82,6 +92,13 @@ export default function DevicePage() {
     setPopover(null);
     setEthPopover(null);
     setRelayError(null);
+    setLedMenu(null);
+    setLedMsg(null);
+    const li = LED_META.findIndex((l) => l.id === id);
+    if (li >= 1) {
+      setLedMenu({ n: li, x, y });
+      return;
+    }
     if (id === 'ethernet1') {
       api.fetchEthernet().then(setEth).catch(() => setEth(null));
       setEthPopover({ x, y });
@@ -110,15 +127,34 @@ export default function DevicePage() {
     else setConfirmRelay({ portId, name, turnOn });
   }
 
-  const hint = hovered ? <Tooltip id={hovered} port={byId.get(hovered)} io={io} now={now} /> : null;
+  async function testLed(n: number) {
+    const res = await api.testLed(n);
+    setLedMsg(res.ok ? null : res.error ?? 'Не удалось включить светодиод');
+    if (res.ok) setLedMenu(null);
+  }
+
+  async function syncClock() {
+    const res = await api.syncClock(Date.now());
+    setClockMsg(res.ok ? 'Время контроллера синхронизировано' : res.error ?? 'Не удалось установить время');
+    if (res.ok) setClockDiff(0);
+  }
+
+  const hint = hovered ? <Tooltip id={hovered} port={byId.get(hovered)} io={io} now={now} offset={offsetRef.current} /> : null;
   const popPort = popover ? byId.get(`module${popover.slot}`) : undefined;
 
   return (
-    <div style={styles.page} onClick={() => { setPopover(null); setEthPopover(null); }}>
+    <div style={styles.page} onClick={() => { setPopover(null); setEthPopover(null); setLedMenu(null); }}>
+      {clockDiff !== null && Math.abs(clockDiff) > 10000 && (
+        <div role="alert" style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5, padding: '8px 24px', background: 'rgba(255,200,61,0.15)', borderBottom: '1px solid #FFC83D', fontSize: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span>Часы контроллера отличаются от времени этого ПК на {Math.round(Math.abs(clockDiff) / 1000)} с (нет интернета/RTC?). Время нажатий кнопок будет неверным.</span>
+          <button className="btn" onClick={() => void syncClock()}>Синхронизировать с ПК</button>
+          {clockMsg && <span style={{ color: 'var(--muted)' }}>{clockMsg}</span>}
+        </div>
+      )}
       <header style={styles.header}>
         <h1 style={styles.title}>Устройство</h1>
         <p style={styles.hint}>
-          Наведите курсор на элемент для описания. ПКМ: по модулю RS-485 — терминал, по реле — состояние и управление, по Ethernet — данные интерфейса.
+          Наведите курсор на элемент для описания. ПКМ: по светодиоду — тест, по модулю RS-485 — терминал, по реле — состояние и управление, по Ethernet — данные интерфейса.
         </p>
       </header>
 
@@ -154,6 +190,14 @@ export default function DevicePage() {
         </div>
       )}
 
+      {ledMenu && (
+        <div className="card" style={{ ...styles.popover, minWidth: 180, left: Math.min(ledMenu.x, window.innerWidth - 220), top: Math.min(ledMenu.y, window.innerHeight - 120) }} role="menu" onClick={(e) => e.stopPropagation()}>
+          <b>LED-{ledMenu.n}</b>
+          <button className="btn primary" style={{ width: '100%', marginTop: 8 }} onClick={() => void testLed(ledMenu.n)}>Тест (1 с)</button>
+          {ledMsg && <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>{ledMsg}</div>}
+        </div>
+      )}
+
       {ethPopover && (
         <div className="card" style={{ ...styles.popover, minWidth: 300, left: Math.min(ethPopover.x, window.innerWidth - 340), top: Math.min(ethPopover.y, window.innerHeight - 420) }} role="dialog" onClick={(e) => e.stopPropagation()}>
           <EthernetPanel eth={eth} />
@@ -171,7 +215,7 @@ export default function DevicePage() {
   );
 }
 
-function Tooltip({ id, port, io, now }: { id: string; port?: PortState; io: IOState | null; now: number }) {
+function Tooltip({ id, port, io, now, offset }: { id: string; port?: PortState; io: IOState | null; now: number; offset: number }) {
   // buttons
   const bi = BUTTON_META.findIndex((b) => b.id === id);
   if (bi >= 0) {
@@ -191,7 +235,7 @@ function Tooltip({ id, port, io, now }: { id: string; port?: PortState; io: IOSt
             <div style={{ marginTop: 2 }}>
               Последнее нажатие:{' '}
               {btn && btn.lastPressedAt > 0 ? (
-                <b>{new Date(btn.lastPressedAt).toLocaleString('ru-RU')} ({ago(now - btn.lastPressedAt)})</b>
+                <b>{new Date(btn.lastPressedAt - offset).toLocaleString('ru-RU')} ({ago(now + offset - btn.lastPressedAt)})</b>
               ) : (
                 <b>ещё не нажимали</b>
               )}

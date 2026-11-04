@@ -11,7 +11,8 @@ import type {
   RegisterTableRow,
   ScenarioGraph,
   SystemInfo,
-  SystemSample
+  SystemSample,
+  VariableView
 } from './types';
 
 // Real controller API (Go backend). Same function signatures as mockApi.ts.
@@ -172,4 +173,49 @@ export function subscribeLive(listener: Listener): () => void {
       source = null;
     }
   };
+}
+
+// ---- LED test, variables, clock ---------------------------------------------------------
+
+export async function testLed(n: number): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('POST', `io/led/${n}/test`, {});
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
+}
+
+export function fetchVariables(): Promise<VariableView[]> {
+  return http('GET', 'variables');
+}
+export async function saveVariable(v: { name: string; format?: string; description: string }): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('PUT', 'variables', v);
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
+}
+export async function deleteVariable(name: string): Promise<{ ok: boolean }> {
+  try {
+    return await http('DELETE', `variables?name=${encodeURIComponent(name)}`);
+  } catch {
+    return { ok: false };
+  }
+}
+export async function setVariable(req: { name: string; value?: unknown; from?: string }): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('POST', 'variables/set', req);
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
+}
+export function fetchClock(): Promise<{ now: number; rtc: boolean }> {
+  return http('GET', 'time');
+}
+export async function syncClock(ms: number): Promise<{ ok: boolean; error?: string }> {
+  try {
+    return await http('POST', 'time', { ms });
+  } catch {
+    return { ok: false, error: NO_LINK };
+  }
 }

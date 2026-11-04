@@ -4,10 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Rs485Config struct {
@@ -49,6 +54,13 @@ func (a *API) routes() http.Handler {
 	mux.HandleFunc("POST /api/scenarios/{id}/stop", a.stopScenario)
 	mux.HandleFunc("GET /api/scenarios/status", a.scenarioStatus)
 	mux.HandleFunc("GET /api/io", a.io)
+	mux.HandleFunc("POST /api/io/led/{n}/test", a.ledTest)
+	mux.HandleFunc("GET /api/variables", a.listVars)
+	mux.HandleFunc("PUT /api/variables", a.putVar)
+	mux.HandleFunc("DELETE /api/variables", a.deleteVar)
+	mux.HandleFunc("POST /api/variables/set", a.setVar)
+	mux.HandleFunc("GET /api/time", a.getTime)
+	mux.HandleFunc("POST /api/time", a.setTime)
 	mux.HandleFunc("GET /api/ethernet", a.ethernet)
 	mux.HandleFunc("POST /api/modules/{id}/relay", a.relaySet)
 	mux.HandleFunc("GET /api/rs485/{slot}/log", a.rs485Log)
@@ -193,6 +205,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var store any
+	var applyErr error
 	switch typ {
 	case "rs485":
 		c := Rs485Config{9600, "none", 8, 1, "", "modbus_rtu"} // fields the client leaves out keep their defaults
@@ -204,10 +217,7 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.DevicePath = a.cfg.UartDev[slot-1] // the device node is fixed by hardware, not user input
-		if err := a.dc.ConfigureRS485(slot, c); err != nil {
-			writeJSON(w, 200, map[string]any{"ok": false, "error": "Не удалось применить: " + err.Error()})
-			return
-		}
+		applyErr = a.dc.ConfigureRS485(slot, c) // the values are kept even when applying fails: they are re-applied when the module appears
 		store = c
 	default:
 		var c RelayConfig
@@ -225,6 +235,10 @@ func (a *API) putModuleConfig(w http.ResponseWriter, r *http.Request) {
 	a.st.mu.Unlock()
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": "Не удалось сохранить: " + err.Error()})
+		return
+	}
+	if applyErr != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "Значения сохранены, но не применены: " + applyErr.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -283,6 +297,7 @@ func (a *API) putScenario(w http.ResponseWriter, r *http.Request) {
 	a.st.data.Scenarios[probe.ID] = body
 	err := a.st.saveLocked()
 	a.st.mu.Unlock()
+	a.st.SyncScenarioVars(body)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -331,10 +346,15 @@ func (a *API) relaySet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": "В этом слоте нет модуля реле"})
 		return
 	}
+	if a.en.Locked() {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": lockedMsg})
+		return
+	}
 	if err := a.dc.SetRelay(slot, 1, in.On); err != nil {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	a.st.SetManual(fmt.Sprintf("relay%d", slot), in.On)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -394,4 +414,71 @@ func (a *API) rs485Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// POST /api/io/led/2/test — the LED lights for one second (manual control, so not while a scenario runs)
+func (a *API) ledTest(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.PathValue("n"))
+	if n < 1 || n > nLeds {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "bad led"})
+		return
+	}
+	if a.en.Locked() {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": lockedMsg})
+		return
+	}
+	prev, _ := a.st.LedOn(n)
+	if err := a.dc.SetLed(n, true); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	go func() {
+		time.Sleep(time.Second)
+		if !a.en.Locked() {
+			_ = a.dc.SetLed(n, prev)
+		}
+	}()
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// GET /api/time -> the controller clock. The board may have no RTC battery and no internet, so the clock can be far off.
+func (a *API) getTime(w http.ResponseWriter, r *http.Request) {
+	_, err := os.Stat("/dev/rtc0")
+	writeJSON(w, 200, map[string]any{"now": time.Now().UnixMilli(), "rtc": err == nil})
+}
+
+// POST /api/time {"ms": <epoch ms>} — set the system clock (and the RTC when there is one) from the browser's time.
+func (a *API) setTime(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Ms int64 }
+	body, _ := readBody(r)
+	if json.Unmarshal(body, &in) != nil || in.Ms < 1_600_000_000_000 {
+		writeJSON(w, 400, map[string]any{"ok": false, "error": "bad time"})
+		return
+	}
+	if out, err := exec.Command("date", "-u", "-s", "@"+strconv.FormatInt(in.Ms/1000, 10)).CombinedOutput(); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": strings.TrimSpace(string(out))})
+		return
+	}
+	if _, err := os.Stat("/dev/rtc0"); err == nil {
+		_ = exec.Command("hwclock", "-w", "-u").Run()
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "now": time.Now().UnixMilli()})
+}
+
+// applyStoredConfig sends the saved RS-485 port settings to a module that has just appeared (after a reboot or a swap).
+func (a *API) applyStoredConfig(slot int, typ string) {
+	if typ != "rs485" {
+		return
+	}
+	time.Sleep(800 * time.Millisecond) // the daemon opens the UART right after it announces the module
+	a.st.mu.RLock()
+	raw, ok := a.st.data.ModuleConfigs[moduleID(slot)]
+	a.st.mu.RUnlock()
+	var c Rs485Config
+	if !ok || json.Unmarshal(raw, &c) != nil || c.BaudRate < 1200 || c.Protocol == "" {
+		return
+	}
+	if err := a.dc.ConfigureRS485(slot, c); err != nil {
+		log.Printf("slot %d: cannot re-apply saved RS-485 settings: %v", slot, err)
+	}
 }

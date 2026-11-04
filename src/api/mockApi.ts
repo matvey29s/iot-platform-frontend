@@ -297,3 +297,39 @@ export function startSimulation() {
 }
 
 export { PORT_IDS };
+
+// ---- LED test, variables, clock (mock) ---------------------------------------------------
+
+import type { VariableView } from './types';
+const mockVars: VariableView[] = [
+  { name: 'BTN-1', format: 'bool', description: '', source: 'button', value: false, writable: false, deletable: false },
+  { name: 'LED-1', format: 'bool', description: '', source: 'led', value: false, writable: true, deletable: false }
+];
+export async function testLed(_n: number): Promise<{ ok: boolean; error?: string }> {
+  return { ok: true };
+}
+export async function fetchVariables(): Promise<VariableView[]> {
+  return mockVars.map((v) => ({ ...v }));
+}
+export async function saveVariable(v: { name: string; format?: string; description: string }): Promise<{ ok: boolean; error?: string }> {
+  const ex = mockVars.find((x) => x.name.toUpperCase() === v.name.toUpperCase());
+  if (ex) ex.description = v.description;
+  else mockVars.push({ name: v.name, format: (v.format as VariableView['format']) ?? 'int', description: v.description, source: 'custom', value: 0, writable: true, deletable: true });
+  return { ok: true };
+}
+export async function deleteVariable(name: string): Promise<{ ok: boolean }> {
+  const i = mockVars.findIndex((x) => x.name === name && x.deletable);
+  if (i >= 0) mockVars.splice(i, 1);
+  return { ok: true };
+}
+export async function setVariable(req: { name: string; value?: unknown }): Promise<{ ok: boolean; error?: string }> {
+  const ex = mockVars.find((x) => x.name === req.name);
+  if (ex) ex.value = req.value as VariableView['value'];
+  return { ok: true };
+}
+export async function fetchClock(): Promise<{ now: number; rtc: boolean }> {
+  return { now: Date.now(), rtc: true };
+}
+export async function syncClock(_ms: number): Promise<{ ok: boolean; error?: string }> {
+  return { ok: true };
+}

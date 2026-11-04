@@ -106,3 +106,8 @@ a { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .led-dot, .led-rays, .led-rays .rays-inner, .btn-hw .btn-plunger-g, .btn-hw .btn-cap, .dev-diagram .port-fill { transition: none; }
 }
+
+/* scenario connectors: a large invisible hit zone around each dot makes connecting easy */
+.react-flow__handle.plc-handle { width: 14px; height: 14px; border: 2px solid #0a1f52; }
+.react-flow__handle.plc-handle::before { content: ''; position: absolute; inset: -14px; border-radius: 50%; }
+.plc-handle-label { position: absolute; top: -6px; font-size: 10px; color: #9fb2de; pointer-events: none; white-space: nowrap; }

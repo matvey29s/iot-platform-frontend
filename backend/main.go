@@ -32,6 +32,7 @@ func main() {
 	}
 
 	api := &API{st: st, dc: dc, en: en, hub: hub, cfg: cfg}
+	st.onModule = api.applyStoredConfig
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           api.routes(),

@@ -1,6 +1,10 @@
 import { useMemo, useState } from 'react';
 import { useMetricsStore } from '../store/metricsStore';
 import TimeSeriesChart from '../components/TimeSeriesChart';
+import MultiLineChart from '../components/MultiLineChart';
+
+// distinct colours, one per CPU core
+const CORE_COLORS = ['#3987e5', '#2ecf7a', '#FFC83D', '#E85CFF', '#ff6b6b', '#1cd3d3', '#ff9a3d', '#a78bfa'];
 
 const RANGES = [
   { id: '1m', label: '1 мин', ms: 60_000 },
@@ -21,6 +25,11 @@ export default function MonitoringPage() {
   }, [history, range]);
 
   const cpu = useMemo(() => windowed.map((p) => ({ t: p.sampledAt, v: p.cpuUsagePercent })), [windowed]);
+  const nCores = info?.cores?.length ?? 0;
+  const coreSeries = useMemo(
+    () => Array.from({ length: nCores }, (_, i) => ({ name: `Ядро ${i}`, color: CORE_COLORS[i % CORE_COLORS.length], values: windowed.map((p) => p.cores?.[i] ?? 0) })),
+    [windowed, nCores]
+  );
   const ram = useMemo(() => windowed.map((p) => ({ t: p.sampledAt, v: p.ramUsedMb })), [windowed]);
 
   if (!info) {
@@ -53,9 +62,9 @@ export default function MonitoringPage() {
         <InfoCard label="Версия Linux" value={info.linuxVersion} />
         <InfoCard label="Модель CPU" value={info.cpuModel} />
         <InfoCard label="Время работы" value={formatUptime(info.uptimeSeconds)} />
-        <InfoCard label="Загрузка CPU" value={`${info.cpuUsagePercent.toFixed(0)}%`} bar={info.cpuUsagePercent} />
+        <InfoCard label={nCores > 1 ? `Загрузка CPU (${nCores} ядра)` : 'Загрузка CPU'} value={`${info.cpuUsagePercent.toFixed(0)}%`} bar={info.cpuUsagePercent} />
         <InfoCard label="RAM" value={`${info.ramUsedMb.toFixed(0)} / ${info.ramTotalMb} МБ`} bar={ramPct} />
-        <InfoCard label="Диск" value={`${info.diskUsedMb} / ${info.diskTotalMb} МБ`} bar={diskPct} />
+        <InfoCard label="Диск (корневой раздел ext4)" value={`${info.diskUsedMb} / ${info.diskTotalMb} МБ`} bar={diskPct} />
       </div>
 
       {/* one filter row above the charts; it scopes both of them */}
@@ -71,15 +80,27 @@ export default function MonitoringPage() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 14 }}>
-        <TimeSeriesChart
-          title="Загрузка CPU"
-          subtitle="Процент от всех ядер, замер каждые 3 с"
-          unit="%"
-          points={cpu}
-          yMax={100}
-          color="var(--viz-cpu)"
-          ariaLabel="График загрузки CPU в процентах от времени"
-        />
+        {nCores > 1 ? (
+          <MultiLineChart
+            title="Загрузка CPU по ядрам"
+            subtitle="Каждое ядро своим цветом, замер каждые 3 с"
+            times={windowed.map((p) => p.sampledAt)}
+            series={coreSeries}
+            yMax={100}
+            unit="%"
+            ariaLabel="График загрузки каждого ядра CPU в процентах от времени"
+          />
+        ) : (
+          <TimeSeriesChart
+            title="Загрузка CPU"
+            subtitle="Процент от всех ядер, замер каждые 3 с"
+            unit="%"
+            points={cpu}
+            yMax={100}
+            color="var(--viz-cpu)"
+            ariaLabel="График загрузки CPU в процентах от времени"
+          />
+        )}
         <TimeSeriesChart
           title="Использование RAM"
           subtitle={`Занято из ${info.ramTotalMb} МБ, замер каждые 3 с`}

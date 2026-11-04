@@ -65,7 +65,8 @@ export type ScenarioNodeType =
   | 'relay_set'
   | 'button_event'
   | 'led_set'
-  | 'delay';
+  | 'delay'
+  | 'parallel_gateway';
 
 export interface RegisterTableRow {
   byteIndex: number;
@@ -90,6 +91,7 @@ export interface ScenarioGraph {
 export interface ScenarioRunStatus {
   running: boolean;
   activeNodeId: string | null;
+  activeNodeIds?: string[];
   lastError: string | null;
 }
 
@@ -103,8 +105,11 @@ export interface ButtonState {
   n: number; // 1..3 (programmable)
   pressed: boolean;
   lastPressedAt: number; // epoch ms, 0 = never
+  now?: number; // controller clock when this was sent
 }
 export interface IOState {
+  /** controller clock when the answer was made (ms) */
+  now?: number;
   leds: LedState[];
   buttons: ButtonState[];
 }
@@ -154,6 +159,7 @@ export interface SystemInfo {
   linuxVersion: string;
   cpuModel: string;
   cpuUsagePercent: number;
+  cores?: number[];
   ramTotalMb: number;
   ramUsedMb: number;
   uptimeSeconds: number;
@@ -165,6 +171,7 @@ export interface SystemInfo {
 export interface SystemSample {
   sampledAt: number;
   cpuUsagePercent: number;
+  cores?: number[];
   ramUsedMb: number;
   ramTotalMb: number;
 }
@@ -172,6 +179,7 @@ export interface SystemSample {
 // ---- Live channel (stands in for the future WebSocket) ----------------------
 
 export type LiveEvent =
+  | { type: 'variable'; payload: { name: string } }
   | { type: 'port_state'; payload: PortState }
   | { type: 'register_value'; payload: { device: string; index: number; value: number } }
   | { type: 'scenario_status'; payload: ScenarioRunStatus }
@@ -181,3 +189,16 @@ export type LiveEvent =
   | { type: 'io_button'; payload: ButtonState }
   | { type: 'rs485_data'; payload: RS485Entry }
   | { type: 'ethernet'; payload: EthInfo };
+
+// ---- Variables ---------------------------------------------------------------------
+
+export type VarFormat = 'bool' | 'int' | 'float' | 'string';
+export interface VariableView {
+  name: string;
+  format: VarFormat;
+  description: string;
+  source: 'button' | 'led' | 'relay' | 'rs485' | 'custom';
+  value: boolean | number | string | null;
+  writable: boolean;
+  deletable: boolean;
+}

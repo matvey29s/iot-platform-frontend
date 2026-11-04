@@ -122,6 +122,18 @@ export function DelayIcon({ size = 22, color = 'currentColor' }: IconProps) {
   );
 }
 
+/** Parallel gateway: one line splits into three. */
+export function GatewayIcon({ size = 22, color = 'currentColor' }: IconProps) {
+  return (
+    <svg {...base(size, color)}>
+      <path d="M3 12h6M9 12l8-7M9 12h8M9 12l8 7" />
+      <circle cx="19" cy="5" r="1.6" fill={color} stroke="none" />
+      <circle cx="19" cy="12" r="1.6" fill={color} stroke="none" />
+      <circle cx="19" cy="19" r="1.6" fill={color} stroke="none" />
+    </svg>
+  );
+}
+
 const ICONS: Record<ScenarioNodeType, (p: IconProps) => JSX.Element> = {
   if_else: IfElseIcon,
   while: WhileIcon,
@@ -131,7 +143,8 @@ const ICONS: Record<ScenarioNodeType, (p: IconProps) => JSX.Element> = {
   relay_set: RelayIcon,
   button_event: ButtonIcon,
   led_set: LedIcon,
-  delay: DelayIcon
+  delay: DelayIcon,
+  parallel_gateway: GatewayIcon
 };
 
 export function NodeIcon({ type, size = 22, color }: { type: ScenarioNodeType } & IconProps) {

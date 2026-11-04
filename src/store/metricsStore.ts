@@ -15,7 +15,7 @@ interface MetricsState {
 }
 
 function toSample(i: SystemInfo): SystemSample {
-  return { sampledAt: i.sampledAt, cpuUsagePercent: i.cpuUsagePercent, ramUsedMb: i.ramUsedMb, ramTotalMb: i.ramTotalMb };
+  return { sampledAt: i.sampledAt, cpuUsagePercent: i.cpuUsagePercent, cores: i.cores, ramUsedMb: i.ramUsedMb, ramTotalMb: i.ramTotalMb };
 }
 
 /**

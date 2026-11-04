@@ -7,6 +7,7 @@ import NexusLogo from './NexusLogo';
 const NAV = [
   { to: '/device', label: 'Устройство' },
   { to: '/scenario', label: 'Сценарий работы' },
+  { to: '/variables', label: 'Переменные' },
   { to: '/monitoring', label: 'Мониторинг' }
 ];
 

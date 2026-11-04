@@ -174,7 +174,7 @@ static void cfg_defaults(void) {
     snprintf(cfg.uart_dev[1], sizeof cfg.uart_dev[1], "/dev/ttyO2");
     snprintf(cfg.hook, sizeof cfg.hook, "/etc/nexus/hooks/module-hook.sh");
     snprintf(cfg.sock, sizeof cfg.sock, "/var/run/nexus/daemon.sock");
-    snprintf(cfg.disk_path, sizeof cfg.disk_path, "/");
+    snprintf(cfg.disk_path, sizeof cfg.disk_path, "auto");
     snprintf(cfg.gpio_root, sizeof cfg.gpio_root, "/sys/class/gpio");
     snprintf(cfg.eth_if, sizeof cfg.eth_if, "eth0");
     snprintf(cfg.mem_dev, sizeof cfg.mem_dev, "/dev/mem");
@@ -186,7 +186,7 @@ static void cfg_defaults(void) {
     cfg.confirm = 2;
     cfg.rs485_pct = 16.4;
     cfg.relay_pct = 91.6;
-    cfg.tol_pct = 5.0;
+    cfg.tol_pct = 10.0;
     int b[NBTN] = {66, 69, 45}, l[NLED] = {49, 112, 20};
     memcpy(cfg.btn_gpio, b, sizeof b);
     memcpy(cfg.led_gpio, l, sizeof l);
@@ -1026,6 +1026,55 @@ static double cpu_usage(void) {
     return pct;
 }
 
+#define MAXCORES 8
+static unsigned long long core_prev_total[MAXCORES], core_prev_busy[MAXCORES];
+static int core_have_prev;
+
+/* per-core load, % each; returns the number of cores */
+static int cpu_cores(double *pct, int max) {
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return 0;
+    char l[256];
+    int n = 0;
+    while (fgets(l, sizeof l, f) && n < max && n < MAXCORES) {
+        int idx;
+        unsigned long long u = 0, ni = 0, sy = 0, id = 0, iow = 0, irq = 0, sirq = 0, st = 0;
+        if (strncmp(l, "cpu", 3) || l[3] < '0' || l[3] > '9') continue;
+        if (sscanf(l, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &idx, &u, &ni, &sy, &id, &iow, &irq, &sirq, &st) < 5) continue;
+        unsigned long long total = u + ni + sy + id + iow + irq + sirq + st, busy = total - id - iow;
+        double p = 0;
+        if (core_have_prev && total > core_prev_total[n]) p = 100.0 * (double)(busy - core_prev_busy[n]) / (double)(total - core_prev_total[n]);
+        core_prev_total[n] = total;
+        core_prev_busy[n] = busy;
+        pct[n++] = p < 0 ? 0 : p > 100 ? 100 : p;
+    }
+    fclose(f);
+    core_have_prev = 1;
+    return n;
+}
+
+/* root filesystem on the SD card = the ext4 partition (not the FAT32 boot one) */
+static void pick_disk(char *out, size_t n) {
+    snprintf(out, n, "%s", cfg.disk_path);
+    if (strcmp(cfg.disk_path, "auto")) return;
+    snprintf(out, n, "/");
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return;
+    char l[512], dev[128], mp[256], ty[32];
+    char best[256] = "";
+    int score = 0;
+    while (fgets(l, sizeof l, f)) {
+        if (sscanf(l, "%127s %255s %31s", dev, mp, ty) != 3) continue;
+        int sc = 0;
+        if (!strcmp(ty, "ext4") || !strcmp(ty, "ext3") || !strcmp(ty, "ext2")) sc = 2;
+        if (!strncmp(dev, "/dev/mmcblk", 11)) sc += 1;
+        if (!strcmp(mp, "/")) sc += 1;
+        if (!strcmp(ty, "ext4") && sc > score) { score = sc; snprintf(best, sizeof best, "%s", mp); }
+    }
+    fclose(f);
+    if (best[0]) snprintf(out, n, "%s", best);
+}
+
 static void ram_usage(double *total_mb, double *used_mb) {
     unsigned long long tot = 0, avail = 0, freeb = 0, buf = 0, cached = 0;
     int have_avail = 0;
@@ -1062,14 +1111,20 @@ static void fmt_system(char *out, size_t n) {
 
     double dt = 0, du = 0;
     struct statvfs sv;
-    if (statvfs(cfg.disk_path, &sv) == 0) {
+    char dpath[256];
+    pick_disk(dpath, sizeof dpath);
+    if (statvfs(dpath, &sv) == 0) {
         dt = (double)sv.f_blocks * (double)sv.f_frsize / 1048576.0;
         du = dt - (double)sv.f_bfree * (double)sv.f_frsize / 1048576.0;
     }
+    double cores[MAXCORES];
+    int nc = cpu_cores(cores, MAXCORES);
+    char cj[160] = "";
+    for (int i = 0; i < nc; i++) { char t[24]; snprintf(t, sizeof t, "%s%.1f", i ? "," : "", cores[i]); strncat(cj, t, sizeof cj - strlen(cj) - 1); }
     snprintf(out, n,
-             "{\"type\":\"system\",\"ts\":%lld,\"linux\":\"%s\",\"cpuModel\":\"%s\",\"cpu\":%.1f,"
+             "{\"type\":\"system\",\"ts\":%lld,\"linux\":\"%s\",\"cpuModel\":\"%s\",\"cpu\":%.1f,\"cores\":[%s],"
              "\"ramTotalMb\":%.1f,\"ramUsedMb\":%.1f,\"uptime\":%.0f,\"diskTotalMb\":%.1f,\"diskUsedMb\":%.1f}\n",
-             now_ms(), lve, cpue, cpu_usage(), rt, ru, up, dt, du);
+             now_ms(), lve, cpue, cpu_usage(), cj, rt, ru, up, dt, du);
 }
 
 /* ---------------------------------------------------------------- commands */

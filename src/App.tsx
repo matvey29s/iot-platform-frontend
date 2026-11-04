@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage';
 import Layout from './components/Layout';
 import DevicePage from './pages/DevicePage';
 import ScenarioPage from './pages/ScenarioPage';
+import VariablesPage from './pages/VariablesPage';
 import MonitoringPage from './pages/MonitoringPage';
 import ChangePasswordGate from './components/ChangePasswordGate';
 
@@ -32,6 +33,7 @@ export default function App() {
         >
           <Route path="/device" element={<DevicePage />} />
           <Route path="/scenario" element={<ScenarioPage />} />
+          <Route path="/variables" element={<VariablesPage />} />
           <Route path="/monitoring" element={<MonitoringPage />} />
           <Route path="/" element={<Navigate to="/device" replace />} />
         </Route>

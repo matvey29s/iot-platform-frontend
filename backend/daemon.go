@@ -55,14 +55,15 @@ type daemonMsg struct {
 	Dir string `json:"dir"`
 	Hex string `json:"hex"`
 	// system
-	Linux       string  `json:"linux"`
-	CPUModel    string  `json:"cpuModel"`
-	CPU         float64 `json:"cpu"`
-	RAMTotalMb  float64 `json:"ramTotalMb"`
-	RAMUsedMb   float64 `json:"ramUsedMb"`
-	Uptime      float64 `json:"uptime"`
-	DiskTotalMb float64 `json:"diskTotalMb"`
-	DiskUsedMb  float64 `json:"diskUsedMb"`
+	Linux       string    `json:"linux"`
+	CPUModel    string    `json:"cpuModel"`
+	CPU         float64   `json:"cpu"`
+	Cores       []float64 `json:"cores"`
+	RAMTotalMb  float64   `json:"ramTotalMb"`
+	RAMUsedMb   float64   `json:"ramUsedMb"`
+	Uptime      float64   `json:"uptime"`
+	DiskTotalMb float64   `json:"diskTotalMb"`
+	DiskUsedMb  float64   `json:"diskUsedMb"`
 	// *_result
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
@@ -128,7 +129,7 @@ func (d *DaemonClient) handle(m daemonMsg) {
 			ts = time.Now().UnixMilli()
 		}
 		d.store.UpdateSystem(SystemInfo{
-			SampledAt: ts, LinuxVersion: m.Linux, CPUModel: m.CPUModel, CPUUsagePercent: m.CPU,
+			SampledAt: ts, LinuxVersion: m.Linux, CPUModel: m.CPUModel, CPUUsagePercent: m.CPU, Cores: m.Cores,
 			RAMTotalMb: m.RAMTotalMb, RAMUsedMb: m.RAMUsedMb, UptimeSeconds: m.Uptime,
 			DiskTotalMb: m.DiskTotalMb, DiskUsedMb: m.DiskUsedMb,
 		})
